@@ -1,7 +1,11 @@
 """Causal (one-pass, no look-ahead) streaming anomaly scorers.
 
 Every scorer maps a 1-D series to a non-negative score per time step where
-``score[t]`` depends only on ``x[0..t]``. Tests enforce this by perturbing
+``score[t]`` depends only on ``x[0..t]`` -- with one exception: CUSUM
+standardises with the median/MAD of its first ``reference`` points, so its
+scores *inside* that reference window are in-sample (Phase I) and only
+scores at ``t >= reference`` are causal. Harnesses keep the reference inside
+the fit window and score only later windows. Tests enforce this by perturbing
 the future and checking that past scores do not move. Thresholds are *not*
 chosen here -- see :mod:`anomaly_lite.thresholds` -- so detectors can be
 compared on threshold-free ranking metrics as well as on alarms.

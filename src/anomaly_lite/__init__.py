@@ -15,4 +15,4 @@ __all__ = [
     "random_precision_at_k",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
