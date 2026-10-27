@@ -128,3 +128,49 @@ def test_valid_mask_and_apply_thresholds():
     assert apply_thresholds([1.0, 5.0, 2.0], [np.nan, 4.0, 3.0]).tolist() == [0, 1, 0]
     with pytest.raises(ValueError):
         rolling_false_alarm_thresholds(s, 0.05, window=5)
+
+
+def test_rescaled_thresholds_track_scale_but_ignore_a_few_percent_of_events():
+    from anomaly_lite.thresholds import (
+        apply_thresholds,
+        false_alarm_threshold,
+        rolling_false_alarm_thresholds,
+        rolling_rescaled_thresholds,
+    )
+
+    rng = np.random.default_rng(2)
+    n = 6000
+    scale = np.linspace(1.0, 2.0, n)
+    s = np.abs(rng.normal(size=n)) * scale
+    y = np.zeros(n, dtype=int)
+    for k in range(2000, n, 400):  # 5% of points are events with large scores
+        s[k : k + 20] += 6.0 * scale[k]
+        y[k : k + 20] = 1
+    cal = slice(1000, 2000)
+    base = false_alarm_threshold(s[cal], 0.005, labels=y[cal])
+    resc = rolling_rescaled_thresholds(s, base, cal, window=1000, start=2000, step=50)
+    quant = rolling_false_alarm_thresholds(s, 0.005, window=1000, start=2000, step=50)
+    normal = y[3000:] == 0
+    far_resc = apply_thresholds(s, resc)[3000:][normal].mean()
+    far_quant = apply_thresholds(s, quant)[3000:][normal].mean()
+    far_static = (s[3000:][normal] > base).mean()
+    assert far_static > 0.02          # the fixed threshold drifts out of calibration
+    assert far_quant < 0.0005         # the label-free tail rank is pushed up by the events
+    assert 0.001 < far_resc < 0.012   # the rescaled one stays near the 0.5% target
+    rec = apply_thresholds(s, resc)[3000:][~normal].mean()
+    assert rec > 0.9
+
+
+def test_rescaled_thresholds_are_causal_and_handle_degenerate_inputs():
+    from anomaly_lite.thresholds import rolling_rescaled_thresholds
+
+    s = np.abs(np.random.default_rng(3).normal(size=2000))
+    a = rolling_rescaled_thresholds(s, 3.0, slice(0, 500), window=500, start=1000, step=10)
+    s2 = s.copy()
+    s2[1500:] *= 10
+    b = rolling_rescaled_thresholds(s2, 3.0, slice(0, 500), window=500, start=1000, step=10)
+    assert np.array_equal(a[:1500], b[:1500], equal_nan=True) and np.isnan(a[:1000]).all()
+    inf = rolling_rescaled_thresholds(s, float("inf"), slice(0, 500), start=1000)
+    assert np.isinf(inf[1000:]).all()
+    with pytest.raises(ValueError):
+        rolling_rescaled_thresholds(s, 3.0, slice(0, 500), step=0)

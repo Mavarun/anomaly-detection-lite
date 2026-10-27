@@ -198,3 +198,43 @@ def apply_thresholds(scores, thresholds) -> np.ndarray:
     if s.shape != t.shape:
         raise ValueError("thresholds must match scores")
     return np.where(np.isnan(t), 0, s > t).astype(int)
+
+
+def rolling_rescaled_thresholds(
+    scores,
+    base_threshold: float,
+    ref: slice,
+    window: int = 1200,
+    start: int = 0,
+    step: int = 50,
+    valid=None,
+) -> np.ndarray:
+    """Walk-forward threshold that keeps the calibrated rank but tracks the score *scale*.
+
+    ``thr[t] = base_threshold * median(trailing window) / median(scores[ref])``
+    with the trailing window ``[t0 - window, t0)`` refreshed every ``step``.
+    The tail quantile of a label-free trailing window is set by whatever
+    events it holds (prevalence ~5% vs a 0.5% target rate), so
+    :func:`rolling_false_alarm_thresholds` ends up far too high; a median moves
+    with a drifting scale but barely with a few percent of events. Labels
+    enter only through ``base_threshold`` (calibrated on ``ref``).
+    """
+    s = np.asarray(scores, dtype=float).ravel()
+    n = s.size
+    if window < 10 or step < 1 or not 0 <= start <= n:
+        raise ValueError("need window >= 10, step >= 1 and 0 <= start <= n")
+    ok = np.ones(n, dtype=bool) if valid is None else np.asarray(valid, dtype=bool).ravel()
+    if ok.shape != s.shape:
+        raise ValueError("valid must match scores")
+    base_ref = s[ref][ok[ref]]
+    m0 = float(np.median(base_ref)) if base_ref.size else 0.0
+    thr = np.full(n, np.nan)
+    if not np.isfinite(base_threshold) or m0 <= 0:
+        thr[start:] = base_threshold
+        return thr
+    for t0 in range(start, n, step):
+        lo = max(0, t0 - window)
+        w = s[lo:t0][ok[lo:t0]]
+        m = float(np.median(w)) if w.size >= 10 else m0
+        thr[t0 : min(n, t0 + step)] = base_threshold * max(m, 1e-12) / m0
+    return thr
