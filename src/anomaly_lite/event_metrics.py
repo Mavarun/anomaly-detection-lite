@@ -156,11 +156,16 @@ class AlarmCost:
     """Operational cost of an alarm sequence (slice 3).
 
     ``total = c_false * false alarm segments + c_miss * missed events
-    + c_delay * sum of detection delays (steps)``, also given per 1,000 steps.
-    Defaults price a page-out at 1, a missed incident at 10 and each step of
-    detection delay at 0.1: a missed event costs as much as ten false pages,
-    and catching it 100 steps late costs as much as missing it. The weights
-    are an assumption, so harnesses should report the components too.
+    + c_delay * sum of detection delays (steps) + c_busy * alarmed normal
+    steps``, also given per 1,000 steps. Defaults price a page-out at 1, a
+    missed incident at 10, each step of detection delay at 0.1 and each step an
+    alarm stays on outside any (tolerance-extended) event at 0.02: a missed
+    event costs as much as ten false pages, catching it 100 steps late costs as
+    much as missing it, and an alarm stuck on for 50 normal steps costs one
+    page. Without the busy term a detector that alarms *everywhere* forms one
+    segment that touches every event and looks almost free (slice-3 CUSUM
+    under drift: point FAR 0.97 at a cost of 1.3 per 1k). The weights are an
+    assumption, so harnesses should report the components too.
     """
 
     total: float
@@ -168,15 +173,16 @@ class AlarmCost:
     n_false: int
     n_missed: int
     delay_steps: int
+    busy_steps: int = 0
 
     def as_dict(self, prefix: str = "cost_") -> dict:
         return {f"{prefix}{k}": v for k, v in self.__dict__.items()}
 
 
 def alarm_cost(y_true, y_pred, tolerance: int = 0, c_false: float = 1.0, c_miss: float = 10.0,
-               c_delay: float = 0.1) -> AlarmCost:
+               c_delay: float = 0.1, c_busy: float = 0.02) -> AlarmCost:
     """Cost of ``y_pred`` with the same hit / false-segment rules as :func:`event_metrics`."""
-    if min(c_false, c_miss, c_delay) < 0:
+    if min(c_false, c_miss, c_delay, c_busy) < 0:
         raise ValueError("costs must be non-negative")
     y, p = _check(y_true, y_pred)
     n = y.size
@@ -192,6 +198,7 @@ def alarm_cost(y_true, y_pred, tolerance: int = 0, c_false: float = 1.0, c_miss:
         else:
             missed += 1
     n_false = sum(1 for s, e in segments(p) if not hit_mask[s : e + 1].any())
-    total = c_false * n_false + c_miss * missed + c_delay * delay
+    busy = int(np.sum((p == 1) & ~hit_mask))
+    total = c_false * n_false + c_miss * missed + c_delay * delay + c_busy * busy
     return AlarmCost(total=float(total), per_1k=1000.0 * total / n if n else float("nan"),
-                     n_false=int(n_false), n_missed=int(missed), delay_steps=int(delay))
+                     n_false=int(n_false), n_missed=int(missed), delay_steps=int(delay), busy_steps=busy)
