@@ -134,3 +134,69 @@ def contiguous_windows(n: int, fractions: tuple[float, ...] = (0.3, 0.2, 0.5)) -
     cuts = np.round(np.cumsum((0.0,) + tuple(fractions)) * n).astype(int)
     cuts[-1] = n
     return [slice(int(a), int(b)) for a, b in zip(cuts[:-1], cuts[1:])]
+
+
+def make_drifting_stream(
+    n: int = 6000,
+    trend_sd: float = 3.0,
+    walk_sd: float = 0.02,
+    amp_growth: float = 0.5,
+    missing_frac: float = 0.0,
+    gap_len: tuple[int, int] = (5, 30),
+    random_state: int = 0,
+    **kwargs,
+) -> StreamData:
+    """Slice-3 stream: the slice-2 stream plus slow drift and optional missing gaps.
+
+    On top of :func:`make_labelled_stream` (same events, same seed):
+
+    * a linear **level trend** totalling ``trend_sd`` marginal noise sd over the
+      series, plus a Gaussian **random walk** with step sd ``walk_sd`` marginal sd
+      (a slowly wandering baseline: the fit-window level is wrong later on);
+    * the **seasonal amplitude** grows linearly by a factor ``1 + amp_growth``
+      from start to end (a per-phase profile fitted early under-removes it);
+    * a fraction ``missing_frac`` of points set to ``NaN`` in gaps of
+      ``gap_len`` points (labels kept; gaps never cover an event's first point,
+      so every event stays detectable in principle).
+
+    Drift is not an anomaly: labels are unchanged. ``frame["observed"]`` marks
+    non-missing points. The drift and gap draws use a separate stream
+    (``random_state + 10_007``), so ``trend_sd = walk_sd = amp_growth = 0`` and
+    ``missing_frac = 0`` reproduce :func:`make_labelled_stream` exactly.
+    """
+    if trend_sd < 0 or walk_sd < 0 or amp_growth < -1:
+        raise ValueError("trend_sd, walk_sd >= 0 and amp_growth >= -1 required")
+    if not 0 <= missing_frac < 0.5:
+        raise ValueError("missing_frac must be in [0, 0.5)")
+    base = make_labelled_stream(n=n, random_state=random_state, **kwargs)
+    meta = dict(base.meta)
+    rng = np.random.default_rng(random_state + 10_007)
+    sd = meta["marginal_sd"]
+    t = np.arange(n)
+    trend = trend_sd * sd * t / max(n - 1, 1)
+    walk = np.cumsum(rng.normal(0.0, walk_sd * sd, size=n)) if walk_sd > 0 else np.zeros(n)
+    season = meta["season_amp"] * np.sin(2.0 * np.pi * t / meta["period"])
+    extra_season = season * amp_growth * t / max(n - 1, 1)
+    value = base.values + trend + walk + extra_season
+
+    observed = np.ones(n, dtype=bool)
+    if missing_frac > 0:
+        starts = {e["start"] for e in base.events}
+        target = int(round(missing_frac * n))
+        lo, hi = gap_len
+        tries = 0
+        while (~observed).sum() < target and tries < 10_000:
+            tries += 1
+            g = int(rng.integers(lo, hi + 1))
+            s = int(rng.integers(meta["warmup"], n - g))
+            if any(s <= st < s + g for st in starts):
+                continue
+            observed[s : s + g] = False
+    value = np.where(observed, value, np.nan)
+
+    frame = base.frame.copy()
+    frame["value"] = value
+    frame["observed"] = observed
+    meta.update({"trend_sd": trend_sd, "walk_sd": walk_sd, "amp_growth": amp_growth,
+                 "missing_frac_target": missing_frac, "missing_frac": float(1 - observed.mean())})
+    return StreamData(frame=frame, events=base.events, meta=meta)

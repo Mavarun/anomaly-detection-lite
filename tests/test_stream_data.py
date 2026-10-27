@@ -59,3 +59,40 @@ def test_bad_arguments():
         make_labelled_stream(event_types=("unicorn",))
     with pytest.raises(ValueError):
         make_labelled_stream(n=500, n_events=50, warmup=100)
+
+
+def test_drifting_stream_without_drift_or_gaps_is_the_slice2_stream():
+    from anomaly_lite.stream_data import make_drifting_stream, make_labelled_stream
+
+    a = make_labelled_stream(n=3000, n_events=9, random_state=4)
+    b = make_drifting_stream(n=3000, n_events=9, random_state=4, trend_sd=0, walk_sd=0, amp_growth=0)
+    assert np.allclose(a.values, b.values)
+    assert (a.labels == b.labels).all() and a.events == b.events
+    assert b.frame["observed"].all()
+
+
+def test_drift_moves_the_late_level_and_amplitude_but_not_the_labels():
+    from anomaly_lite.stream_data import make_drifting_stream, make_labelled_stream
+
+    a = make_labelled_stream(n=6000, random_state=1)
+    b = make_drifting_stream(n=6000, random_state=1, trend_sd=3.0, walk_sd=0.0, amp_growth=1.0)
+    d = b.values - a.values
+    sd = a.meta["marginal_sd"]
+    assert abs(d[:200].mean()) < 0.2 * sd
+    assert d[-500:].mean() > 2.0 * sd  # the trend
+    late = slice(5000, 6000)
+    assert np.ptp(b.values[late] - a.values[late] - d[late].mean()) > 2.0  # amplitude grew
+    assert (a.labels == b.labels).all()
+
+
+def test_missing_gaps_hit_the_target_fraction_and_spare_event_starts():
+    from anomaly_lite.stream_data import make_drifting_stream
+
+    s = make_drifting_stream(n=6000, random_state=2, missing_frac=0.05)
+    obs = s.frame["observed"].to_numpy()
+    assert 0.05 <= 1 - obs.mean() < 0.06
+    assert np.isnan(s.values[~obs]).all() and np.isfinite(s.values[obs]).all()
+    assert all(obs[e["start"]] for e in s.events)
+    assert obs[: s.meta["warmup"]].all()
+    with pytest.raises(ValueError):
+        make_drifting_stream(missing_frac=0.6)
