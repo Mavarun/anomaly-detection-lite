@@ -3,7 +3,8 @@
 Research slices on anomaly detection with **honest evaluation**:
 
 1. **Slice 1**: IsolationForest and OneClassSVM on synthetic contaminated Gaussian data, precision@k.
-2. **Slice 2 (this PR)**: causal **streaming detectors** (EWMA, CUSUM, robust z), **point vs point-adjusted vs event-level** metrics, **threshold calibration on a held-out window**, an **IsolationForest vs LOF** benchmark on synthetic plus one public dataset, and a CUSUM check on the public **Nile** series.
+2. **Slice 2**: causal **streaming detectors** (EWMA, CUSUM, robust z), **point vs point-adjusted vs event-level** metrics, **threshold calibration on a held-out window**, an **IsolationForest vs LOF** benchmark on synthetic plus one public dataset, and a CUSUM check on the public **Nile** series.
+3. **Slice 3 (this PR)**: the same stream under **slow drift and 5% missing data**; a causal **online de-seasonaliser**, an explicit **variance detector**, gap-skipping detectors, **walk-forward thresholds** (label-free rolling quantile and a rescaled held-out threshold) and an **alarm-cost model**, all scored out of sample with paired per-seed effects.
 
 **Not a production claim.** Reproducible, offline, seeded demos on planted anomalies plus two small public datasets bundled with scikit-learn / statsmodels.
 
@@ -18,9 +19,121 @@ pip install -e ".[dev]"
 pytest -q
 python scripts/run_anomaly_slice.py      # slice 1
 python scripts/run_streaming_slice.py    # slice 2 (~16 s on CPU)
+python scripts/run_drift_slice.py        # slice 3 (~30 s on CPU)
 ```
 
 CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12).
+
+---
+
+## Slice 3 hypotheses
+
+1. Slow drift (a level trend, a wandering baseline, a growing seasonal amplitude) breaks detectors that depend on a fit-once reference. A causal online de-seasonaliser recovers most of the loss and costs little on a stationary stream.
+2. A threshold fixed on one held-out window drifts out of calibration. A walk-forward, label-free recalibration should keep the false-alarm rate near target.
+3. An explicit variance detector adds variance-burst detection that mean detectors miss.
+4. 5% missing data in short gaps costs little if detectors skip gaps instead of imputing them.
+
+## Slice 3 method
+
+- **Stream** (`make_drifting_stream`): the slice-2 stream (same events, same seed) plus a linear level trend of 3 marginal sd over the series, a Gaussian random-walk baseline (step 0.02 sd), and a seasonal amplitude that grows 50%. `drift_missing` also removes 5% of points in gaps of 5-30 (never an event's first point). Labels are unchanged: drift is not an anomaly.
+- **Windows and evaluation**: fit 30% / cal 20% / test 50%, in time order. Every number below is out of sample on the test window, 10 seeds, mean ± std.
+- **De-seasonalising**: `static` is slice 2's per-phase median profile, fitted once. `online` (`OnlineSeasonalProfile`) is a causal additive Holt-Winters update (level alpha 0.005, season gamma 0.1) with Huber-clipped innovations (2 sigma), initialised on fit and run forward from cal.
+- **Detectors** (all `missing="skip"`: a gap scores 0 and leaves the state untouched): EWMA, CUSUM, robust z, the new `RollingVarianceDetector` (log ratio of short- to long-window MAD-scale of first differences), `rz_or_var` (union of robust-z and variance alarms, each at half the rate) and a random control.
+- **Thresholds** (target FAR 0.5%): `static_quantile` is slice 2's `cal_quantile`, fixed for the whole test window. `rolling_quantile` is the same rank on the trailing 1,200 observed scores, refreshed every 50 steps, with no labels. `rolling_rescaled` is the static threshold times the trailing-median / cal-median score.
+- **Cost** (`alarm_cost`): 1 per false page, 10 per missed event, 0.1 per step of detection delay and 0.02 per alarmed normal step. Without the last term, an alarm that never clears costs almost nothing. These weights are assumptions; components are kept in the long frame.
+- **Paired effects**: per-seed differences, percentile bootstrap 95% CI over seeds, exact sign test.
+
+## Slice 3 results
+
+### Held-out FAR-quantile threshold (static_quantile): fit-once vs online de-seasonalising (test window, mean ± std, 10 seeds)
+
+| scenario | detector | event F1, fit-once | event F1, online | point FAR, fit-once | point FAR, online | cost / 1k, fit-once | cost / 1k, online |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| stationary | ewma | 0.769 ± 0.065 | 0.790 ± 0.061 | 0.004 | 0.003 | 9.9 ± 3.3 | 9.7 ± 3.9 |
+| stationary | cusum | 0.315 ± 0.260 | 0.288 ± 0.307 | 0.064 | 0.024 | 37.9 ± 7.1 | 38.5 ± 7.1 |
+| stationary | robust_z | 0.903 ± 0.030 | 0.897 ± 0.025 | 0.005 | 0.005 | 7.5 ± 2.3 | 8.1 ± 2.5 |
+| stationary | variance | 0.527 ± 0.094 | 0.536 ± 0.104 | 0.011 | 0.011 | 30.1 ± 4.8 | 29.7 ± 4.9 |
+| stationary | rz_or_var | 0.868 ± 0.048 | 0.875 ± 0.042 | 0.010 | 0.009 | 8.9 ± 2.7 | 8.8 ± 3.7 |
+| stationary | random | 0.198 ± 0.064 | 0.198 ± 0.064 | 0.006 | 0.006 | 42.4 ± 3.9 | 42.4 ± 3.9 |
+| drift | ewma | 0.721 ± 0.052 | 0.789 ± 0.057 | 0.004 | 0.004 | 13.2 ± 2.2 | 9.2 ± 3.1 |
+| drift | cusum | 0.780 ± 0.329 | 0.139 ± 0.206 | 0.868 | 0.015 | 18.2 ± 9.1 | 41.4 ± 5.2 |
+| drift | robust_z | 0.869 ± 0.036 | 0.908 ± 0.024 | 0.003 | 0.004 | 10.2 ± 2.6 | 7.4 ± 2.7 |
+| drift | variance | 0.545 ± 0.107 | 0.540 ± 0.107 | 0.009 | 0.011 | 29.7 ± 5.0 | 29.7 ± 4.9 |
+| drift | rz_or_var | 0.865 ± 0.035 | 0.887 ± 0.044 | 0.009 | 0.009 | 10.1 ± 2.3 | 8.4 ± 3.6 |
+| drift | random | 0.198 ± 0.064 | 0.198 ± 0.064 | 0.006 | 0.006 | 42.4 ± 3.9 | 42.4 ± 3.9 |
+| drift_missing | ewma | 0.714 ± 0.058 | 0.779 ± 0.060 | 0.005 | 0.004 | 13.2 ± 3.5 | 9.1 ± 3.5 |
+| drift_missing | cusum | 0.750 ± 0.272 | 0.155 ± 0.188 | 0.868 | 0.012 | 18.2 ± 9.1 | 41.3 ± 4.3 |
+| drift_missing | robust_z | 0.872 ± 0.049 | 0.895 ± 0.023 | 0.004 | 0.005 | 9.7 ± 3.0 | 7.8 ± 2.5 |
+| drift_missing | variance | 0.537 ± 0.104 | 0.520 ± 0.109 | 0.011 | 0.011 | 29.9 ± 4.8 | 30.3 ± 5.2 |
+| drift_missing | rz_or_var | 0.855 ± 0.028 | 0.851 ± 0.057 | 0.009 | 0.010 | 10.5 ± 1.9 | 10.1 ± 3.6 |
+| drift_missing | random | 0.194 ± 0.059 | 0.194 ± 0.059 | 0.006 | 0.006 | 42.5 ± 3.8 | 42.5 ± 3.8 |
+
+### Threshold protocols on the drift scenario, online de-seasonalising (mean over 10 seeds)
+
+| detector | protocol | event F1 | point FAR | cost / 1k |
+| --- | --- | ---: | ---: | ---: |
+| ewma | static_quantile | 0.789 | 0.0036 | 9.2 |
+| ewma | rolling_quantile | 0.708 | 0.0003 | 19.4 |
+| ewma | rolling_rescaled | 0.764 | 0.0042 | 9.5 |
+| cusum | static_quantile | 0.139 | 0.0151 | 41.4 |
+| cusum | rolling_quantile | 0.308 | 0.0137 | 38.6 |
+| cusum | rolling_rescaled | 0.376 | 0.0537 | 35.4 |
+| robust_z | static_quantile | 0.908 | 0.0037 | 7.4 |
+| robust_z | rolling_quantile | 0.625 | 0.0000 | 25.0 |
+| robust_z | rolling_rescaled | 0.904 | 0.0039 | 7.6 |
+| variance | static_quantile | 0.540 | 0.0105 | 29.7 |
+| variance | rolling_quantile | 0.405 | 0.0008 | 35.7 |
+| variance | rolling_rescaled | 0.508 | 0.0423 | 31.8 |
+| random | static_quantile | 0.198 | 0.0061 | 42.4 |
+| random | rolling_quantile | 0.184 | 0.0054 | 42.7 |
+| random | rolling_rescaled | 0.195 | 0.0126 | 43.1 |
+
+### Paired per-seed effects (10 seeds; bootstrap 95% CI; exact sign test)
+
+| comparison (b - a) | scenario | detector | metric | mean diff | 95% CI | seeds with diff > 0 | sign p |
+| --- | --- | --- | --- | ---: | :---: | ---: | ---: |
+| online - fit-once | drift | cusum | event_f1 | -0.641 | [-0.907, -0.327] | 1/10 | 0.021 |
+| online - fit-once | drift | ewma | event_f1 | +0.068 | [+0.030, +0.106] | 8/10 | 0.109 |
+| online - fit-once | drift | robust_z | event_f1 | +0.039 | [+0.014, +0.068] | 9/10 | 0.021 |
+| online - fit-once | stationary | cusum | event_f1 | -0.027 | [-0.103, +0.039] | 2/10 | 0.688 |
+| online - fit-once | stationary | ewma | event_f1 | +0.021 | [-0.003, +0.044] | 6/10 | 0.754 |
+| online - fit-once | stationary | robust_z | event_f1 | -0.006 | [-0.026, +0.016] | 3/10 | 0.344 |
+| online - fit-once | drift | cusum | cost_per_1k | +23.216 | [+14.898, +28.933] | 9/10 | 0.021 |
+| online - fit-once | drift | ewma | cost_per_1k | -3.979 | [-5.845, -1.809] | 2/10 | 0.109 |
+| online - fit-once | drift | robust_z | cost_per_1k | -2.745 | [-4.699, -1.032] | 1/10 | 0.021 |
+| online - fit-once | stationary | cusum | cost_per_1k | +0.636 | [-0.828, +2.161] | 4/10 | 1.000 |
+| online - fit-once | stationary | ewma | cost_per_1k | -0.205 | [-1.699, +1.475] | 3/10 | 0.344 |
+| online - fit-once | stationary | robust_z | cost_per_1k | +0.608 | [-0.859, +1.957] | 7/10 | 0.344 |
+| rescaled - static thr | drift | ewma | event_f1 | -0.025 | [-0.045, -0.008] | 1/10 | 0.039 |
+| rescaled - static thr | drift | robust_z | event_f1 | -0.003 | [-0.016, +0.009] | 3/10 | 0.727 |
+| 5% missing - none | drift vs drift_missing | ewma | event_f1 | -0.011 | [-0.022, -0.000] | 3/10 | 0.344 |
+| 5% missing - none | drift vs drift_missing | robust_z | event_f1 | -0.013 | [-0.023, -0.001] | 1/10 | 0.021 |
+| rz_or_var - robust_z | drift | robust_z vs rz_or_var | event_f1 | -0.021 | [-0.042, +0.001] | 3/10 | 0.344 |
+
+### Reading the results
+
+- **H1 supported for the adaptive detectors.** Under drift with the fit-once profile, robust z drops from 0.903 to 0.869 event F1 and EWMA from 0.769 to 0.721. The online de-seasonaliser brings them to 0.908 (+0.039, CI [+0.014, +0.068], 9/10 seeds, p = 0.021) and 0.789 (+0.068, 8/10). Cost per 1k falls from 10.2 to 7.4 and from 13.2 to 9.2. On the stationary stream it changes little (robust z -0.006, EWMA +0.021, both CIs cover 0).
+- **CUSUM is the exception, in both directions.** With the fit-once profile and its fit-window scale, drift makes CUSUM alarm on 87% of normal test points. Its event F1 of 0.780 is an artefact of one endless alarm segment touching every event; the cost model charges it 18.2 per 1k for the busy time. The online profile fixes the false alarms (point FAR 0.015) but collapses recall (F1 0.139), because CUSUM's accumulated sums need a stable reference and the adaptive level absorbs part of every shift. Neither configuration is usable under drift.
+- **H2 rejected as stated.** The label-free rolling quantile is far too conservative: point FAR 0.0000-0.0008 for EWMA, robust z and the variance detector against a 0.5% target, and robust-z F1 falls to 0.625 (cost 25.0 vs 7.4). The trailing window holds events at about 5% prevalence, 10x the target rate, so its tail rank lands inside the event scores. Rescaling the held-out threshold by a trailing median avoids that, but it does not help either: robust z -0.003 (CI covers 0), EWMA -0.025 (1/10 seeds better), and it doubles the random control's FAR (bounded scores make the ratio touchy). Once the de-seasonaliser adapts, the fixed held-out threshold is already close to target (realised FAR 0.0036-0.0037 for EWMA and robust z).
+- **H3 not supported here.** The variance detector alone reaches only 0.52-0.55 F1. Its union with robust z is slightly *worse* than robust z alone under drift (-0.021, CI [-0.042, +0.001]), because robust z already catches every variance burst on this stream (slice-2 recall 1.00) and the union pays twice the false-alarm budget. It is kept as a tool and not recommended.
+- **H4 supported.** 5% missing data costs robust z -0.013 F1 (CI [-0.023, -0.001]) and EWMA -0.011 under drift with skipping.
+
+### Test design (slice 3)
+
+- Data: zero drift reproduces slice 2 exactly; the trend and amplitude growth are visible late but not early; gaps hit the target fraction and spare event starts.
+- Detectors: skip mode scores gaps 0 and matches strict mode on gap-free data; EWMA and CUSUM scores on observed points equal those of the gap-free series. The variance detector is causal, flags a mean-zero x3.5 burst and ignores a 4-sd level shift that robust z sees. The online profile is causal, tracks a doubling amplitude where the static one leaks it, and a 50-sd spike barely moves later residuals.
+- Thresholds: rolling thresholds use only the past and no labels; a drifting score scale breaks the static threshold; the rolling quantile is pushed up by 5% events while the rescaled one stays near target.
+- Cost: hand-computed components; the busy term prices an always-on alarm that event metrics call perfect.
+- Harness: online residuals are causal and equal static ones on fit; erasing every test label leaves every alarm unchanged; robust z beats random; paired-effect arithmetic by hand. `tests/test_drift_readme_claims.py` re-checks each directional claim above at reduced scale (4 seeds).
+
+## Limits / weaknesses (slice 3)
+
+- Still synthetic, with one drift recipe (linear trend + small random walk + linear amplitude growth). Abrupt regime changes, multiple seasonalities and real incident data are untested.
+- The online de-seasonaliser's alpha / gamma / clip were set on a toy series in the unit tests, not tuned on the eval grid. A long level-shift event is partly absorbed into the level at a rate capped by the clip.
+- No working CUSUM under drift: it needs a re-referencing scheme (for example, a reset with a fresh robust scale after each alarm), which is not built.
+- The rolling protocols assume a trailing window is mostly normal. With 5% event prevalence and a 0.5% target, that fails by construction; a censored or event-aware reference was not tried.
+- Cost weights (1 / 10 / 0.1 / 0.02) are assumptions. Rankings between the adaptive detectors held at these weights, but were not tested across a weight grid.
+- 10 seeds: sign tests bottom out at p = 0.002 and many effects are 1-3 seeds from a tie.
 
 ---
 
@@ -169,12 +282,13 @@ src/anomaly_lite/
   detectors.py       # IsolationForest, OneClassSVM, LOF wrappers
   metrics.py         # precision@k, random baseline
   stream_data.py     # labelled seasonal AR(1) stream + contiguous windows
-  streaming.py       # causal EWMA / CUSUM / robust-z + seasonal profile
-  event_metrics.py   # point, point-adjusted, event-level metrics
-  thresholds.py      # held-out FAR quantile, best-F1, oracle protocols
+  streaming.py       # causal EWMA / CUSUM / robust-z / variance + static and online seasonal profiles
+  event_metrics.py   # point, point-adjusted, event-level metrics, alarm cost
+  thresholds.py      # held-out FAR quantile, best-F1, oracle, walk-forward rolling / rescaled
   benchmark.py       # IF vs LOF vs OCSVM tabular benchmark (incl. breast cancer)
   stream_eval.py     # end-to-end streaming harness + Nile CUSUM
-scripts/             # run_anomaly_slice.py, run_streaming_slice.py
+  drift_eval.py      # slice 3: drift / missing data x de-seasonalisers x thresholds x costs
+scripts/             # run_anomaly_slice.py, run_streaming_slice.py, run_drift_slice.py
 tests/
 ```
 
