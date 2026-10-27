@@ -89,3 +89,41 @@ def test_all_alarm_metrics_keys_and_validation():
         event_metrics([0, 1], [0, 1, 0])
     with pytest.raises(ValueError):
         event_metrics([0, 1], [0, 1], tolerance=-1)
+
+
+# --- alarm cost (slice 3) ------------------------------------------------------
+
+def test_alarm_cost_hand_computed():
+    from anomaly_lite.event_metrics import alarm_cost
+
+    y = np.zeros(100, dtype=int)
+    y[10:20] = 1  # event A
+    y[50:55] = 1  # event B (missed)
+    p = np.zeros(100, dtype=int)
+    p[13] = 1     # A detected with delay 3
+    p[30:32] = 1  # one false segment
+    p[80] = 1     # another false segment
+    c = alarm_cost(y, p, tolerance=0)
+    assert (c.n_false, c.n_missed, c.delay_steps) == (2, 1, 3)
+    assert c.total == 2 * 1.0 + 1 * 10.0 + 3 * 0.1
+    assert c.per_1k == 1000 * c.total / 100
+    # tolerance turns a late alarm into a (slow) hit instead of a false alarm + miss
+    p2 = np.zeros(100, dtype=int)
+    p2[22] = 1
+    late = alarm_cost(y[:40], p2[:40], tolerance=5)
+    assert (late.n_false, late.n_missed, late.delay_steps) == (0, 0, 12)
+
+
+def test_alarm_cost_agrees_with_event_metrics_and_rejects_negative_costs():
+    from anomaly_lite.event_metrics import alarm_cost, event_metrics
+
+    rng = np.random.default_rng(3)
+    y = np.zeros(2000, dtype=int)
+    for s in (100, 600, 1200, 1700):
+        y[s : s + 30] = 1
+    p = (rng.uniform(size=2000) < 0.01).astype(int)
+    ev, c = event_metrics(y, p, tolerance=10), alarm_cost(y, p, tolerance=10)
+    assert c.n_false == ev.n_false_segments
+    assert c.n_missed == ev.n_true_events - ev.n_detected_events
+    with pytest.raises(ValueError):
+        alarm_cost(y, p, c_miss=-1)

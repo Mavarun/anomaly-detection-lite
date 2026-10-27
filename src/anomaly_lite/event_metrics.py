@@ -149,3 +149,49 @@ def all_alarm_metrics(y_true, y_pred, tolerance: int = 0) -> dict:
     out.update(point_adjusted_metrics(y_true, y_pred).as_dict("pa_"))
     out.update(event_metrics(y_true, y_pred, tolerance).as_dict("event_"))
     return out
+
+
+@dataclass(frozen=True)
+class AlarmCost:
+    """Operational cost of an alarm sequence (slice 3).
+
+    ``total = c_false * false alarm segments + c_miss * missed events
+    + c_delay * sum of detection delays (steps)``, also given per 1,000 steps.
+    Defaults price a page-out at 1, a missed incident at 10 and each step of
+    detection delay at 0.1: a missed event costs as much as ten false pages,
+    and catching it 100 steps late costs as much as missing it. The weights
+    are an assumption, so harnesses should report the components too.
+    """
+
+    total: float
+    per_1k: float
+    n_false: int
+    n_missed: int
+    delay_steps: int
+
+    def as_dict(self, prefix: str = "cost_") -> dict:
+        return {f"{prefix}{k}": v for k, v in self.__dict__.items()}
+
+
+def alarm_cost(y_true, y_pred, tolerance: int = 0, c_false: float = 1.0, c_miss: float = 10.0,
+               c_delay: float = 0.1) -> AlarmCost:
+    """Cost of ``y_pred`` with the same hit / false-segment rules as :func:`event_metrics`."""
+    if min(c_false, c_miss, c_delay) < 0:
+        raise ValueError("costs must be non-negative")
+    y, p = _check(y_true, y_pred)
+    n = y.size
+    windows = [(s, min(n - 1, e + tolerance)) for s, e in segments(y)]
+    hit_mask = np.zeros(n, dtype=bool)
+    for s, e in windows:
+        hit_mask[s : e + 1] = True
+    missed, delay = 0, 0
+    for s, e in windows:
+        idx = np.flatnonzero(p[s : e + 1])
+        if idx.size:
+            delay += int(idx[0])
+        else:
+            missed += 1
+    n_false = sum(1 for s, e in segments(p) if not hit_mask[s : e + 1].any())
+    total = c_false * n_false + c_miss * missed + c_delay * delay
+    return AlarmCost(total=float(total), per_1k=1000.0 * total / n if n else float("nan"),
+                     n_false=int(n_false), n_missed=int(missed), delay_steps=int(delay))
