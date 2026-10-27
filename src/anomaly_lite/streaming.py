@@ -188,3 +188,36 @@ class RobustZDetector:
         scale = (mad * _MAD_TO_SD).clip(lower=1e-9)
         z = ((s - med).abs() / scale).fillna(0.0)
         return z.to_numpy()
+
+
+class RollingVarianceDetector:
+    """Explicit variance detector: short-window vs long-window robust scale of first differences.
+
+    score_t = max(0, log(S_t / L_t)) where S_t is the MAD-scale of the last
+    ``short`` first differences (ending at t, so causal) and L_t the MAD-scale
+    of the ``long`` differences *before* that short window. Differencing
+    removes the level, so level shifts barely move the score (only the one
+    step where the shift happens) while a variance burst raises S_t for its
+    whole length. Added in slice 3 because no slice-2 detector modelled
+    variance; a mean-zero burst was caught only through its large points.
+    """
+
+    def __init__(self, short: int = 20, long: int = 400, min_long: Optional[int] = None,
+                 missing: str = "raise") -> None:
+        if short < 5 or long < 2 * short:
+            raise ValueError("need short >= 5 and long >= 2 * short")
+        self.short, self.long = short, long
+        self.min_long = min_long or long // 4
+        self.missing = missing
+
+    def score(self, values) -> np.ndarray:
+        x = _as_1d(values, self.missing)
+        d = pd.Series(np.r_[np.nan, np.diff(x)])  # NaN at gaps and at t = 0
+        absdev = lambda w: np.nanmedian(np.abs(w - np.nanmedian(w)))  # noqa: E731
+        s = d.rolling(self.short, min_periods=max(5, self.short // 2)).apply(absdev, raw=True)
+        lg = d.shift(self.short).rolling(self.long, min_periods=self.min_long).apply(absdev, raw=True)
+        ratio = (s.clip(lower=1e-12) / lg.clip(lower=1e-12)).to_numpy()
+        out = np.log(ratio)
+        out = np.where(np.isfinite(out), np.maximum(out, 0.0), 0.0)
+        out[np.isnan(x)] = 0.0
+        return out

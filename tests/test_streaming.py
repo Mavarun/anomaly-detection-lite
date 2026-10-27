@@ -159,3 +159,43 @@ def test_seasonal_profile_fits_through_gaps():
     prof = SeasonalProfile(96, missing="skip").fit(x, t)
     r = prof.transform(x, t)
     assert np.isnan(r[100:130]).all() and np.nanstd(r) < 0.2
+
+
+# --- explicit variance detector (slice 3) ------------------------------------
+
+def test_variance_detector_is_causal_and_flags_a_mean_zero_burst():
+    from anomaly_lite.streaming import RollingVarianceDetector
+
+    det = RollingVarianceDetector(short=20, long=200)
+    x = _noise(1500, 11)
+    base = det.score(x)
+    y = x.copy()
+    y[1000:] += np.random.default_rng(1).normal(0, 3, size=500)
+    assert np.allclose(base[:1000], det.score(y)[:1000])  # rewriting the future
+    z = x.copy()
+    z[800:860] *= 3.5  # variance burst, mean zero
+    s = det.score(z)
+    assert (s[830:860] > np.quantile(s[300:780], 0.99)).mean() > 0.9
+
+
+def test_variance_detector_mostly_ignores_a_level_shift():
+    from anomaly_lite.streaming import RobustZDetector, RollingVarianceDetector
+
+    x = _noise(1500, 12)
+    x[800:900] += 4.0
+    v = RollingVarianceDetector(short=20, long=200).score(x)
+    rz = RobustZDetector(window=200).score(x)
+    bg_v, bg_rz = np.quantile(v[300:780], 0.99), np.quantile(rz[300:780], 0.99)
+    assert (v[805:900] > bg_v).mean() < 0.2  # at most the step itself is seen
+    assert (rz[805:850] > bg_rz).mean() > 0.5  # a mean detector sees the shift (until it adapts)
+
+
+def test_variance_detector_validates_and_handles_gaps():
+    from anomaly_lite.streaming import RollingVarianceDetector
+
+    with pytest.raises(ValueError):
+        RollingVarianceDetector(short=4)
+    with pytest.raises(ValueError):
+        RollingVarianceDetector(short=20, long=30)
+    s = RollingVarianceDetector(short=20, long=200, missing="skip").score(_gappy())
+    assert np.isfinite(s).all() and (s >= 0).all() and (s[700:740] == 0).all()
