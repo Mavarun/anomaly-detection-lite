@@ -199,3 +199,48 @@ def test_variance_detector_validates_and_handles_gaps():
         RollingVarianceDetector(short=20, long=30)
     s = RollingVarianceDetector(short=20, long=200, missing="skip").score(_gappy())
     assert np.isfinite(s).all() and (s >= 0).all() and (s[700:740] == 0).all()
+
+
+# --- online de-seasonaliser (slice 3) -----------------------------------------
+
+def _seasonal(n, amp_growth=0.0, trend=0.0, seed=0):
+    t = np.arange(n)
+    amp = 2.0 * (1 + amp_growth * t / n)
+    return t, 10 + trend * t / n + amp * np.sin(2 * np.pi * t / 96) + _noise(n, seed) * 0.3
+
+
+def test_online_profile_is_causal_and_tracks_drift_that_a_static_profile_leaks():
+    from anomaly_lite.streaming import OnlineSeasonalProfile
+
+    t, x = _seasonal(6000, amp_growth=1.0, trend=3.0, seed=1)
+    fit = slice(0, 1800)
+    static = SeasonalProfile(96).fit(x[fit], t[fit]).transform(x, t)
+    online = OnlineSeasonalProfile(96).fit(x[fit], t[fit])
+    r = online.transform(x[1800:], t[1800:])
+    late = slice(4200 - 1800, None)
+    assert np.std(static[4200:]) > 1.0          # static leaks the grown amplitude and the trend
+    assert np.std(r[late]) < 0.5                # online stays near the 0.3 noise
+    y = x.copy()
+    y[4000:] += 5.0
+    r2 = online.transform(y[1800:], t[1800:])
+    assert np.allclose(r[: 4000 - 1800], r2[: 4000 - 1800])  # rewriting the future
+
+
+def test_online_profile_clip_keeps_a_spike_out_of_the_state_and_skips_gaps():
+    from anomaly_lite.streaming import OnlineSeasonalProfile
+
+    t, x = _seasonal(3000, seed=2)
+    prof = OnlineSeasonalProfile(96, missing="skip").fit(x[:1000], t[:1000])
+    y = x.copy()
+    y[1500] += 50.0
+    y[2000:2030] = np.nan
+    a = prof.transform(x[1000:], t[1000:])
+    b = prof.transform(y[1000:], t[1000:])
+    assert b[500] > 45  # the spike shows in full in its own residual
+    after = slice(501, 1000)
+    assert np.max(np.abs(a[after] - b[after])) < 0.1  # ... but barely moves later ones
+    assert np.isnan(b[1000:1030]).all() and np.isfinite(b[1030:]).all()
+    with pytest.raises(RuntimeError):
+        OnlineSeasonalProfile(96).transform(x)
+    with pytest.raises(ValueError):
+        OnlineSeasonalProfile(96, alpha=0.0)

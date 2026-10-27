@@ -221,3 +221,66 @@ class RollingVarianceDetector:
         out = np.where(np.isfinite(out), np.maximum(out, 0.0), 0.0)
         out[np.isnan(x)] = 0.0
         return out
+
+
+class OnlineSeasonalProfile:
+    """Causal additive Holt-Winters de-seasonaliser with Huber-clipped updates (slice 3).
+
+    ``SeasonalProfile`` is fitted once on an early window, so a drifting level
+    or a growing seasonal amplitude leaks into every later residual. Here the
+    level ``l`` and the per-phase offsets ``s[p]`` keep adapting:
+
+        r_t = x_t - (l_{t-1} + s_{t-1}[t mod P])       (residual: past state only)
+        e_t = clip(r_t, -c * sigma, c * sigma)          (an anomaly barely moves it)
+        l_t = l_{t-1} + alpha * e_t
+        s_t[t mod P] = s_{t-1}[t mod P] + gamma * (1 - alpha) * e_t
+
+    ``sigma`` is the MAD-scale of the fit-window residual of a static profile.
+    ``fit`` initialises ``l`` / ``s`` from that window (static per-phase
+    medians), and ``transform`` runs from the first point of its input, which
+    must start right after the fit window (``t`` gives the phase). Missing
+    points (``missing="skip"``) get a NaN residual and no update. The price of
+    adapting: a long level shift is partly absorbed into ``l``, at a rate
+    capped by the clip. Each phase is updated once per period, so ``gamma``
+    = 0.1 remembers about ten cycles (0.05 lagged a doubling amplitude: late
+    residual sd 0.53 vs 0.39 on a 0.3-noise toy series, see the tests).
+    """
+
+    def __init__(self, period: int, alpha: float = 0.005, gamma: float = 0.1, clip: float = 2.0,
+                 missing: str = "raise") -> None:
+        if period < 2 or not 0 < alpha < 1 or not 0 <= gamma < 1 or clip <= 0:
+            raise ValueError("need period >= 2, 0 < alpha < 1, 0 <= gamma < 1, clip > 0")
+        self.period, self.alpha, self.gamma, self.clip, self.missing = period, alpha, gamma, clip, missing
+        self.level_: Optional[float] = None
+        self.season_: Optional[np.ndarray] = None
+        self.sigma_: Optional[float] = None
+
+    def fit(self, values, t=None) -> "OnlineSeasonalProfile":
+        x = _as_1d(values, self.missing)
+        t = np.arange(x.size) if t is None else np.asarray(t, dtype=int)
+        static = SeasonalProfile(self.period, missing=self.missing).fit(x, t)
+        lvl = float(np.nanmedian(static.profile_))
+        self.level_, self.season_ = lvl, static.profile_ - lvl
+        r = static.transform(x, t)
+        r = r[~np.isnan(r)]
+        self.sigma_ = max(float(np.median(np.abs(r - np.median(r)))) * _MAD_TO_SD, 1e-9)
+        return self
+
+    def transform(self, values, t=None) -> np.ndarray:
+        if self.level_ is None:
+            raise RuntimeError("OnlineSeasonalProfile is not fitted")
+        x = _as_1d(values, self.missing)
+        t = np.arange(x.size) if t is None else np.asarray(t, dtype=int)
+        lvl, seas = float(self.level_), self.season_.copy()
+        a, g, c = self.alpha, self.gamma, self.clip * float(self.sigma_)
+        out = np.full(x.size, np.nan)
+        for i in range(x.size):
+            if np.isnan(x[i]):
+                continue
+            p = int(t[i]) % self.period
+            r = x[i] - (lvl + seas[p])
+            out[i] = r
+            e = min(max(r, -c), c)
+            lvl += a * e
+            seas[p] += g * (1.0 - a) * e
+        return out
