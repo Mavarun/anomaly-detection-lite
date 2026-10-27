@@ -153,3 +153,48 @@ def evaluate_threshold_protocols(
             "point_far": float(pred[normal_te].mean()) if normal_te.any() else float("nan"),
         })
     return pd.DataFrame(rows)
+
+
+def rolling_false_alarm_thresholds(
+    scores,
+    rate: float = 0.005,
+    window: int = 1200,
+    start: int = 0,
+    step: int = 50,
+    valid=None,
+) -> np.ndarray:
+    """Walk-forward, label-free threshold: re-calibrated on the trailing window only.
+
+    ``thr[t]`` (for ``t >= start``) is :func:`false_alarm_threshold` on the
+    scores in ``[t0 - window, t0)`` where ``t0`` is the latest refresh point
+    ``<= t`` (refreshes every ``step`` steps from ``start``). No label is used:
+    the trailing window is assumed normal, so events inside it raise the
+    threshold (conservative). ``valid`` (bool mask) drops points from the
+    calibration sample, e.g. missing observations whose score is a placeholder
+    0. Entries before ``start`` are ``nan``. Unlike a threshold fixed on one
+    calibration window, this tracks drift in the score distribution; the
+    price is that a long event slowly becomes part of the reference.
+    """
+    s = np.asarray(scores, dtype=float).ravel()
+    n = s.size
+    if window < 10 or step < 1 or not 0 <= start <= n:
+        raise ValueError("need window >= 10, step >= 1 and 0 <= start <= n")
+    ok = np.ones(n, dtype=bool) if valid is None else np.asarray(valid, dtype=bool).ravel()
+    if ok.shape != s.shape:
+        raise ValueError("valid must match scores")
+    thr = np.full(n, np.nan)
+    for t0 in range(start, n, step):
+        lo = max(0, t0 - window)
+        ref = s[lo:t0][ok[lo:t0]]
+        val = false_alarm_threshold(ref, rate) if ref.size >= 10 else float("inf")
+        thr[t0 : min(n, t0 + step)] = val
+    return thr
+
+
+def apply_thresholds(scores, thresholds) -> np.ndarray:
+    """Point-wise ``score > threshold`` (``nan`` thresholds never alarm)."""
+    s = np.asarray(scores, dtype=float).ravel()
+    t = np.asarray(thresholds, dtype=float).ravel()
+    if s.shape != t.shape:
+        raise ValueError("thresholds must match scores")
+    return np.where(np.isnan(t), 0, s > t).astype(int)
