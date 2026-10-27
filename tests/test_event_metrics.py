@@ -104,8 +104,8 @@ def test_alarm_cost_hand_computed():
     p[30:32] = 1  # one false segment
     p[80] = 1     # another false segment
     c = alarm_cost(y, p, tolerance=0)
-    assert (c.n_false, c.n_missed, c.delay_steps) == (2, 1, 3)
-    assert c.total == 2 * 1.0 + 1 * 10.0 + 3 * 0.1
+    assert (c.n_false, c.n_missed, c.delay_steps, c.busy_steps) == (2, 1, 3, 3)
+    assert c.total == pytest.approx(2 * 1.0 + 1 * 10.0 + 3 * 0.1 + 3 * 0.02)
     assert c.per_1k == 1000 * c.total / 100
     # tolerance turns a late alarm into a (slow) hit instead of a false alarm + miss
     p2 = np.zeros(100, dtype=int)
@@ -127,3 +127,17 @@ def test_alarm_cost_agrees_with_event_metrics_and_rejects_negative_costs():
     assert c.n_missed == ev.n_true_events - ev.n_detected_events
     with pytest.raises(ValueError):
         alarm_cost(y, p, c_miss=-1)
+
+
+def test_busy_term_prices_an_alarm_that_never_clears():
+    from anomaly_lite.event_metrics import alarm_cost, event_metrics
+
+    y = np.zeros(1000, dtype=int)
+    for s in (100, 400, 700):
+        y[s : s + 20] = 1
+    always = np.ones(1000, dtype=int)
+    ev = event_metrics(y, always, tolerance=20)
+    assert ev.recall == 1.0 and ev.n_false_segments == 0  # event metrics call it perfect
+    c = alarm_cost(y, always, tolerance=20)
+    assert c.busy_steps == 1000 - 3 * 40 and c.per_1k == pytest.approx(1000 * 0.02 * 880 / 1000 + 0.0)
+    assert alarm_cost(y, always, tolerance=20, c_busy=0.0).total == 0.0
