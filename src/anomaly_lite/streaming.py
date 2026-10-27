@@ -36,31 +36,45 @@ import pandas as pd
 _MAD_TO_SD = 1.4826
 
 
-def _as_1d(x) -> np.ndarray:
+MISSING = ("raise", "skip")
+
+
+def _as_1d(x, missing: str = "raise") -> np.ndarray:
+    """1-D float array; NaN marks a missing point only when ``missing="skip"``.
+
+    ``+-inf`` is always rejected. With ``"skip"`` a detector scores a missing
+    point 0 (no alarm is possible on data that never arrived) and does not
+    update its state from it, so a gap neither inflates nor resets the scale.
+    """
+    if missing not in MISSING:
+        raise ValueError(f"missing must be one of {MISSING}")
     x = np.asarray(x, dtype=float).ravel()
     if x.size == 0:
         raise ValueError("empty series")
-    if not np.all(np.isfinite(x)):
-        raise ValueError("series must be finite")
+    if np.isinf(x).any() or (missing == "raise" and np.isnan(x).any()):
+        raise ValueError("series must be finite (pass missing='skip' to allow NaN gaps)")
+    if np.isnan(x).all():
+        raise ValueError("series has no observed point")
     return x
 
 
 class SeasonalProfile:
     """Per-phase median seasonal profile fitted on a reference window."""
 
-    def __init__(self, period: int) -> None:
+    def __init__(self, period: int, missing: str = "raise") -> None:
         if period < 2:
             raise ValueError("period must be >= 2")
         self.period = period
+        self.missing = missing
         self.profile_: Optional[np.ndarray] = None
 
     def fit(self, values, t=None) -> "SeasonalProfile":
-        x = _as_1d(values)
+        x = _as_1d(values, self.missing)
         t = np.arange(x.size) if t is None else np.asarray(t, dtype=int)
         phase = t % self.period
         prof = np.full(self.period, np.nan)
         for p in range(self.period):
-            m = phase == p
+            m = (phase == p) & ~np.isnan(x)
             if m.any():
                 prof[p] = np.median(x[m])
         if np.isnan(prof).any():
@@ -71,7 +85,7 @@ class SeasonalProfile:
     def transform(self, values, t=None) -> np.ndarray:
         if self.profile_ is None:
             raise RuntimeError("SeasonalProfile is not fitted")
-        x = _as_1d(values)
+        x = _as_1d(values, self.missing)
         t = np.arange(x.size) if t is None else np.asarray(t, dtype=int)
         return x - self.profile_[t % self.period]
 
@@ -79,20 +93,26 @@ class SeasonalProfile:
 class EWMADetector:
     """Exponentially weighted mean/variance z-score with Huber-clipped updates."""
 
-    def __init__(self, alpha: float = 0.05, clip: float = 3.0, warmup: int = 50) -> None:
+    def __init__(self, alpha: float = 0.05, clip: float = 3.0, warmup: int = 50,
+                 missing: str = "raise") -> None:
         if not 0 < alpha < 1:
             raise ValueError("alpha must be in (0, 1)")
-        self.alpha, self.clip, self.warmup = alpha, clip, warmup
+        self.alpha, self.clip, self.warmup, self.missing = alpha, clip, warmup, missing
 
     def score(self, values) -> np.ndarray:
-        x = _as_1d(values)
+        x = _as_1d(values, self.missing)
         n, a = x.size, self.alpha
         out = np.zeros(n)
         w = min(self.warmup, n)
-        m = float(np.mean(x[:w]))
-        v = float(np.var(x[:w])) if w > 1 else 1.0
+        head = x[:w][~np.isnan(x[:w])]
+        if head.size == 0:
+            head = x[~np.isnan(x)][:1]
+        m = float(np.mean(head))
+        v = float(np.var(head)) if head.size > 1 else 1.0
         v = max(v, 1e-12)
         for t in range(n):
+            if np.isnan(x[t]):
+                continue
             s = np.sqrt(v)
             r = x[t] - m
             if t >= w:
@@ -114,16 +134,20 @@ class CUSUMDetector:
     """
 
     def __init__(self, k: float = 0.5, reference: int = 500,
-                 reset_threshold: Optional[float] = None) -> None:
+                 reset_threshold: Optional[float] = None, missing: str = "raise") -> None:
         if k < 0:
             raise ValueError("k must be non-negative")
         self.k, self.reference, self.reset_threshold = k, reference, reset_threshold
+        self.missing = missing
         self.mu_: Optional[float] = None
         self.sd_: Optional[float] = None
 
     def score(self, values) -> np.ndarray:
-        x = _as_1d(values)
+        x = _as_1d(values, self.missing)
         ref = x[: min(self.reference, x.size)]
+        ref = ref[~np.isnan(ref)]
+        if ref.size == 0:
+            raise ValueError("CUSUM reference window has no observed point")
         med = float(np.median(ref))
         mad = float(np.median(np.abs(ref - med))) * _MAD_TO_SD
         self.mu_, self.sd_ = med, max(mad, 1e-12)
@@ -131,6 +155,8 @@ class CUSUMDetector:
         sp = sm = 0.0
         out = np.zeros(x.size)
         for t in range(x.size):
+            if np.isnan(z[t]):  # missing: hold the sums, no score
+                continue
             sp = max(0.0, sp + z[t] - self.k)
             sm = max(0.0, sm - z[t] - self.k)
             out[t] = max(sp, sm)
@@ -142,19 +168,23 @@ class CUSUMDetector:
 class RobustZDetector:
     """Median/MAD z-score over a strictly trailing window (current point excluded)."""
 
-    def __init__(self, window: int = 200, min_periods: Optional[int] = None) -> None:
+    def __init__(self, window: int = 200, min_periods: Optional[int] = None,
+                 missing: str = "raise") -> None:
         if window < 3:
             raise ValueError("window must be >= 3")
         self.window = window
         self.min_periods = min_periods or max(3, window // 4)
+        self.missing = missing
 
     def score(self, values) -> np.ndarray:
-        x = _as_1d(values)
+        # The trailing window spans ``window`` time steps; missing points inside
+        # it are ignored (pandas rolling skips NaN), and a missing point scores 0.
+        x = _as_1d(values, self.missing)
         s = pd.Series(x)
         past = s.shift(1)  # exclude current observation
         roll = past.rolling(self.window, min_periods=self.min_periods)
         med = roll.median()
-        mad = roll.apply(lambda w: np.median(np.abs(w - np.median(w))), raw=True)
+        mad = roll.apply(lambda w: np.nanmedian(np.abs(w - np.nanmedian(w))), raw=True)
         scale = (mad * _MAD_TO_SD).clip(lower=1e-9)
         z = ((s - med).abs() / scale).fillna(0.0)
         return z.to_numpy()

@@ -100,3 +100,62 @@ def test_validation():
         RobustZDetector(window=2)
     with pytest.raises(ValueError):
         EWMADetector().score(np.array([1.0, np.nan]))
+
+
+# --- missing data (slice 3) -------------------------------------------------
+
+def _gappy(n=1200, seed=3):
+    x = _noise(n, seed)
+    x[700:740] = np.nan
+    x[900:905] = np.nan
+    return x
+
+
+@pytest.mark.parametrize("make", [
+    lambda: EWMADetector(alpha=0.05, warmup=30, missing="skip"),
+    lambda: CUSUMDetector(k=0.5, reference=100, missing="skip"),
+    lambda: RobustZDetector(window=50, missing="skip"),
+], ids=["ewma", "cusum", "robust_z"])
+def test_skip_mode_scores_gaps_zero_and_matches_raise_mode_without_gaps(make):
+    x = _gappy()
+    s = make().score(x)
+    assert np.isfinite(s).all() and (s[np.isnan(x)] == 0).all()
+    assert np.allclose(s[:700], make().score(x[:700]))  # before the first gap: unchanged
+    full = _noise(1200, 3)
+    raise_mode = type(make())(**{k: v for k, v in vars(make()).items()
+                                 if k in ("alpha", "clip", "warmup", "k", "reference", "window", "min_periods")})
+    assert np.allclose(make().score(full), raise_mode.score(full))
+
+
+@pytest.mark.parametrize("make", [
+    lambda: EWMADetector(alpha=0.05, warmup=30, missing="skip"),
+    lambda: CUSUMDetector(k=0.5, reference=100, missing="skip"),
+], ids=["ewma", "cusum"])
+def test_a_gap_does_not_update_state(make):
+    x = _gappy()
+    obs = ~np.isnan(x)
+    # state-space detectors: scores on observed points equal the scores of the
+    # series with the gap removed (the gap is invisible to them)
+    assert np.allclose(make().score(x)[obs], make().score(x[obs]))
+
+
+def test_missing_is_rejected_by_default_and_inf_always():
+    x = _gappy()
+    for det in (EWMADetector(), CUSUMDetector(reference=100), RobustZDetector(window=50)):
+        with pytest.raises(ValueError):
+            det.score(x)
+    with pytest.raises(ValueError):
+        EWMADetector(missing="skip").score(np.array([1.0, np.inf, 2.0]))
+    with pytest.raises(ValueError):
+        EWMADetector(missing="skip").score(np.array([np.nan, np.nan]))
+    with pytest.raises(ValueError):
+        EWMADetector(missing="drop").score(np.array([1.0, 2.0]))
+
+
+def test_seasonal_profile_fits_through_gaps():
+    t = np.arange(960)
+    x = np.sin(2 * np.pi * t / 96) + _noise(960, 5) * 0.1
+    x[100:130] = np.nan
+    prof = SeasonalProfile(96, missing="skip").fit(x, t)
+    r = prof.transform(x, t)
+    assert np.isnan(r[100:130]).all() and np.nanstd(r) < 0.2
