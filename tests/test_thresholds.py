@@ -80,3 +80,51 @@ def test_validation():
         false_alarm_threshold(np.ones(10), rate=0.0)
     with pytest.raises(ValueError):
         best_f1_threshold(np.ones(5), np.zeros(5), metric="auc")
+
+
+# --- walk-forward thresholds (slice 3) ----------------------------------------
+
+def test_rolling_thresholds_only_use_the_past_and_no_labels():
+    from anomaly_lite.thresholds import rolling_false_alarm_thresholds
+
+    rng = np.random.default_rng(0)
+    s = rng.normal(size=3000)
+    thr = rolling_false_alarm_thresholds(s, rate=0.01, window=500, start=1000, step=25)
+    assert np.isnan(thr[:1000]).all() and np.isfinite(thr[1000:]).all()
+    s2 = s.copy()
+    s2[2000:] += 10.0  # rewrite the future
+    thr2 = rolling_false_alarm_thresholds(s2, rate=0.01, window=500, start=1000, step=25)
+    assert np.array_equal(thr[:2000], thr2[:2000], equal_nan=True)
+    # piecewise constant between refreshes, and equal to the static rule on its window
+    assert len(np.unique(thr[1000:1025])) == 1
+    from anomaly_lite.thresholds import false_alarm_threshold
+    assert thr[1500] == false_alarm_threshold(s[1000:1500], 0.01)
+
+
+def test_rolling_thresholds_track_a_drifting_score_scale_where_a_static_one_fails():
+    from anomaly_lite.thresholds import apply_thresholds, false_alarm_threshold, rolling_false_alarm_thresholds
+
+    rng = np.random.default_rng(1)
+    n = 6000
+    s = np.abs(rng.normal(size=n)) * np.linspace(1.0, 2.0, n)  # scale drifts up x2
+    static = false_alarm_threshold(s[1000:2000], 0.005)
+    far_static = (s[3000:] > static).mean()
+    roll = rolling_false_alarm_thresholds(s, 0.005, window=1000, start=2000, step=50)
+    far_roll = apply_thresholds(s, roll)[3000:].mean()
+    assert far_static > 0.03  # >6x the target
+    assert far_roll < 0.012
+
+
+def test_valid_mask_and_apply_thresholds():
+    from anomaly_lite.thresholds import apply_thresholds, rolling_false_alarm_thresholds
+
+    s = np.r_[np.zeros(100), np.arange(100.0)]
+    v = np.r_[np.zeros(100, dtype=bool), np.ones(100, dtype=bool)]
+    a = rolling_false_alarm_thresholds(s, 0.05, window=200, start=200, step=1, valid=v)
+    assert a.size == 200 and np.isnan(a).all()  # start == n: nothing to threshold
+    thr = rolling_false_alarm_thresholds(np.r_[s, s], 0.05, window=200, start=200, step=1,
+                                         valid=np.r_[v, v])
+    assert thr[200] >= 95  # the placeholder zeros were dropped
+    assert apply_thresholds([1.0, 5.0, 2.0], [np.nan, 4.0, 3.0]).tolist() == [0, 1, 0]
+    with pytest.raises(ValueError):
+        rolling_false_alarm_thresholds(s, 0.05, window=5)
