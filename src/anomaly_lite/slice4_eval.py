@@ -16,7 +16,7 @@ Per seed and scenario (:func:`run_slice4_experiment`), reusing the slice-3 strea
   twice the sd of an i.i.d. sum, and the textbook k = 0.5 (tuned for i.i.d. noise) is far too
   twitchy; k was tried at 0.5 / 1.0 / 1.5 on the development seeds only.
 * Threshold protocols at a 0.5% target false-alarm rate: ``static_quantile`` (label-free except for
-  dropping known anomalies on cal), ``rolling_rescaled`` (slice 3) and ``rolling_bulk`` (label-free
+  dropping known anomalies on cal), ``rolling_quantile`` (slice 3, plain trailing rank), ``rolling_rescaled`` (slice 3) and ``rolling_bulk`` (label-free
   walk-forward, :func:`rolling_bulk_tail_thresholds`; half-normal tail for the |z|-type scores EWMA and
   robust z, exponential for the accumulated or log-ratio scores CUSUM and variance, a rule fixed
   before the evaluation seeds were run).
@@ -49,6 +49,7 @@ from anomaly_lite.streaming import (
 from anomaly_lite.thresholds import (
     apply_thresholds,
     false_alarm_threshold,
+    rolling_false_alarm_thresholds,
     rolling_bulk_tail_thresholds,
     rolling_rescaled_thresholds,
 )
@@ -61,7 +62,7 @@ SCENARIOS4 = {
 }
 DESEASON4 = ("static", "online", "harm_d", "harm_dw")
 DETECTORS4 = ("ewma", "robust_z", "cusum", "cusum_k15", "cusum_frozen", "cusum_frozen_k15", "variance")
-PROTOCOLS4 = ("static_quantile", "rolling_rescaled", "rolling_bulk")
+PROTOCOLS4 = ("static_quantile", "rolling_quantile", "rolling_rescaled", "rolling_bulk")
 TAIL = {"ewma": "halfnormal", "robust_z": "halfnormal", "cusum": "exponential", "cusum_k15": "exponential",
         "cusum_frozen": "exponential", "cusum_frozen_k15": "exponential", "variance": "exponential"}
 
@@ -101,6 +102,9 @@ def alarms4(s, y, obs, cal, test, protocol, det, rate=0.005):
     window = cal.stop - cal.start
     if protocol == "static_quantile":
         return (s[test] > false_alarm_threshold(s[cal][keep], rate)).astype(int)
+    if protocol == "rolling_quantile":
+        thr = rolling_false_alarm_thresholds(s, rate, window=window, start=test.start, step=ROLL_STEP, valid=obs)
+        return apply_thresholds(s, thr)[test]
     if protocol == "rolling_rescaled":
         base = false_alarm_threshold(s[cal][keep], rate)
         thr = rolling_rescaled_thresholds(s, base, cal, window=window, start=test.start, step=ROLL_STEP, valid=obs)
