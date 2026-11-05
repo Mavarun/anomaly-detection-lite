@@ -379,3 +379,79 @@ class OnlineHarmonicProfile:
             P = (P - np.outer(k, Pf)) / lam
             P = 0.5 * (P + P.T)
         return out
+
+
+class FrozenReferenceCUSUM:
+    """Two-sided Page CUSUM with a *self-updating but freezable* reference (slice 4).
+
+    ``CUSUMDetector`` standardises with a fixed fit-window median / MAD, so a
+    slow drift pushes the sums up for ever (87% of normal test points alarmed in
+    slice 3). Re-estimating the reference online cures that, but a reference
+    that keeps following the data also absorbs the very shift the CUSUM is
+    trying to accumulate (slice 3: F1 0.139 with an online level). The usual
+    compromise is used here: the reference (EW mean ``m``, EW scale ``s``)
+    adapts only while the detector looks calm, and is frozen while either sum is
+    above ``freeze_at``:
+
+        z_t = (x_t - m) / s                 (past reference only)
+        S+_t = max(0, S+_{t-1} + z_t - k),  S-_t likewise,  score_t = max(S+, S-)
+        if score_{t-1} < freeze_at:         # calm: let the reference follow drift
+            e = clip(x_t - m, +-c s);  m += alpha e;  s^2 += beta (e^2 - s^2)
+
+    A permanent change would freeze the reference for ever, so after
+    ``max_freeze`` consecutive frozen steps both sums reset and the reference
+    re-anchors on the last ``anchor`` points (the new normal). Input should
+    already be de-seasonalised. ``reference`` points initialise ``m`` / ``s`` by
+    median / MAD (in-sample, like :class:`CUSUMDetector`; score only later
+    windows). A missing point (``missing="skip"``) holds all state and scores 0.
+    """
+
+    def __init__(self, k: float = 0.5, reference: int = 500, alpha: float = 0.005, beta: float = 0.01,
+                 clip: float = 3.0, freeze_at: float = 2.0, max_freeze: int = 150, anchor: int = 30,
+                 missing: str = "raise") -> None:
+        if k < 0 or not 0 < alpha < 1 or not 0 < beta < 1 or clip <= 0 or freeze_at <= 0:
+            raise ValueError("need k >= 0, alpha/beta in (0, 1), clip > 0, freeze_at > 0")
+        if max_freeze < 1 or anchor < 5:
+            raise ValueError("need max_freeze >= 1 and anchor >= 5")
+        self.k, self.reference, self.alpha, self.beta, self.clip = k, reference, alpha, beta, clip
+        self.freeze_at, self.max_freeze, self.anchor, self.missing = freeze_at, max_freeze, anchor, missing
+        self.n_reanchor_ = 0
+
+    def score(self, values) -> np.ndarray:
+        x = _as_1d(values, self.missing)
+        ref = x[: min(self.reference, x.size)]
+        ref = ref[~np.isnan(ref)]
+        if ref.size == 0:
+            raise ValueError("reference window has no observed point")
+        m = float(np.median(ref))
+        s = max(float(np.median(np.abs(ref - m))) * _MAD_TO_SD, 1e-9)
+        s0 = s
+        sp = sm = 0.0
+        frozen = 0
+        recent: list[float] = []
+        out = np.zeros(x.size)
+        self.n_reanchor_ = 0
+        for t in range(x.size):
+            if np.isnan(x[t]):
+                continue
+            z = (x[t] - m) / s
+            calm = max(sp, sm) < self.freeze_at
+            sp = max(0.0, sp + z - self.k)
+            sm = max(0.0, sm - z - self.k)
+            out[t] = max(sp, sm)
+            recent.append(x[t])
+            if len(recent) > self.anchor:
+                recent.pop(0)
+            if calm:
+                frozen = 0
+                e = min(max(x[t] - m, -self.clip * s), self.clip * s)
+                m += self.alpha * e
+                s = max(np.sqrt(s * s + self.beta * (e * e - s * s)), 0.25 * s0)
+            else:
+                frozen += 1
+                if frozen >= self.max_freeze and len(recent) >= self.anchor:
+                    m = float(np.median(recent))
+                    sp = sm = 0.0
+                    frozen = 0
+                    self.n_reanchor_ += 1
+        return out
