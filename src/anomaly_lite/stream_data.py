@@ -144,6 +144,8 @@ def make_drifting_stream(
     missing_frac: float = 0.0,
     gap_len: tuple[int, int] = (5, 30),
     random_state: int = 0,
+    season2_period: int = 0,
+    season2_amp: float = 0.0,
     **kwargs,
 ) -> StreamData:
     """Slice-3 stream: the slice-2 stream plus slow drift and optional missing gaps.
@@ -159,6 +161,11 @@ def make_drifting_stream(
       ``gap_len`` points (labels kept; gaps never cover an event's first point,
       so every event stays detectable in principle).
 
+    Slice 4 adds an optional **second seasonality** (``season2_period`` > 0 and
+    ``season2_amp`` > 0): a sinusoid of that period (e.g. 7 x 96 for a weekly cycle
+    over a 96-step day) added to the value. A one-period de-seasonaliser sees it as
+    slow drift in the level.
+
     Drift is not an anomaly: labels are unchanged. ``frame["observed"]`` marks
     non-missing points. The drift and gap draws use a separate stream
     (``random_state + 10_007``), so ``trend_sd = walk_sd = amp_growth = 0`` and
@@ -168,6 +175,8 @@ def make_drifting_stream(
         raise ValueError("trend_sd, walk_sd >= 0 and amp_growth >= -1 required")
     if not 0 <= missing_frac < 0.5:
         raise ValueError("missing_frac must be in [0, 0.5)")
+    if season2_period < 0 or season2_amp < 0 or (season2_period == 1):
+        raise ValueError("season2_period must be 0 (off) or >= 2 and season2_amp >= 0")
     base = make_labelled_stream(n=n, random_state=random_state, **kwargs)
     meta = dict(base.meta)
     rng = np.random.default_rng(random_state + 10_007)
@@ -177,7 +186,9 @@ def make_drifting_stream(
     walk = np.cumsum(rng.normal(0.0, walk_sd * sd, size=n)) if walk_sd > 0 else np.zeros(n)
     season = meta["season_amp"] * np.sin(2.0 * np.pi * t / meta["period"])
     extra_season = season * amp_growth * t / max(n - 1, 1)
-    value = base.values + trend + walk + extra_season
+    season2 = (season2_amp * np.sin(2.0 * np.pi * t / season2_period + 1.0)
+               if season2_period >= 2 and season2_amp > 0 else np.zeros(n))
+    value = base.values + trend + walk + extra_season + season2
 
     observed = np.ones(n, dtype=bool)
     if missing_frac > 0:
@@ -197,6 +208,6 @@ def make_drifting_stream(
     frame = base.frame.copy()
     frame["value"] = value
     frame["observed"] = observed
-    meta.update({"trend_sd": trend_sd, "walk_sd": walk_sd, "amp_growth": amp_growth,
+    meta.update({"season2_period": season2_period, "season2_amp": season2_amp, "trend_sd": trend_sd, "walk_sd": walk_sd, "amp_growth": amp_growth,
                  "missing_frac_target": missing_frac, "missing_frac": float(1 - observed.mean())})
     return StreamData(frame=frame, events=base.events, meta=meta)

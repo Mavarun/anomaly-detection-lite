@@ -96,3 +96,19 @@ def test_missing_gaps_hit_the_target_fraction_and_spare_event_starts():
     assert obs[: s.meta["warmup"]].all()
     with pytest.raises(ValueError):
         make_drifting_stream(missing_frac=0.6)
+
+
+def test_second_seasonality_is_additive_off_by_default_and_keeps_labels():
+    from anomaly_lite.stream_data import make_drifting_stream
+
+    kw = dict(n=3000, n_events=9, trend_sd=0.0, walk_sd=0.0, amp_growth=0.0, random_state=6)
+    off = make_drifting_stream(**kw)
+    on = make_drifting_stream(season2_period=672, season2_amp=1.5, **kw)
+    plain = make_labelled_stream(n=3000, n_events=9, random_state=6)
+    np.testing.assert_array_equal(off.values, plain.values)  # default: unchanged stream
+    np.testing.assert_array_equal(on.labels, off.labels)
+    t = np.arange(3000)
+    np.testing.assert_allclose(on.values - off.values, 1.5 * np.sin(2 * np.pi * t / 672 + 1.0))
+    assert on.meta["season2_period"] == 672 and off.meta["season2_amp"] == 0.0
+    with pytest.raises(ValueError):
+        make_drifting_stream(season2_period=1, season2_amp=1.0, n=3000, n_events=9)
