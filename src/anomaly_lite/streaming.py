@@ -284,3 +284,98 @@ class OnlineSeasonalProfile:
             lvl += a * e
             seas[p] += g * (1.0 - a) * e
         return out
+
+
+class OnlineHarmonicProfile:
+    """Causal harmonic de-seasonaliser: level + sin/cos terms per period, by robust RLS (slice 4).
+
+    ``OnlineSeasonalProfile`` keeps one offset per phase of a *single* period.
+    A second cycle (a weekly rhythm over a daily one) is invisible to it and
+    leaks into the level, and a period of 672 would need ~2 observations per
+    phase in a 1,800-step fit window. Here the mean is a small linear model
+
+        m_t = b0 + sum_p sum_{h=1..H} a_ph sin(2 pi h t / P_p) + c_ph cos(2 pi h t / P_p)
+
+    with 1 + 2 H n_periods coefficients, so a long period costs only two
+    parameters. ``fit`` solves it on the fit window by a few Huber-reweighted
+    least-squares passes (anomalies in the window barely move it).
+    ``transform`` then runs recursive least squares with forgetting factor
+    ``forgetting`` (memory ~ 1 / (1 - forgetting) steps) from the first point of
+    its input:
+
+        r_t = x_t - phi_t' theta_{t-1}                 (residual: past state only)
+        e_t = clip(r_t, -c sigma, c sigma)             (an anomaly barely moves theta)
+        K_t = P phi / (lambda + phi' P phi);  theta += K_t e_t;  P = (P - K_t phi' P) / lambda
+
+    so the level, the amplitudes and the phases all drift slowly with the data.
+    Missing points (``missing="skip"``) get a NaN residual and no update.
+    ``t`` must be the absolute time index. Costs: a coarse sinusoid can not
+    follow a non-sinusoidal pattern with ``n_harmonics`` = 1, and a long event
+    is partly absorbed into the level at a rate capped by the clip.
+    """
+
+    def __init__(self, periods=(96,), n_harmonics: int = 1, forgetting: float = 0.995,
+                 clip: float = 2.0, missing: str = "raise") -> None:
+        periods = tuple(int(p) for p in np.atleast_1d(periods))
+        if not periods or min(periods) < 2 or n_harmonics < 1:
+            raise ValueError("need periods >= 2 and n_harmonics >= 1")
+        if not 0.9 < forgetting <= 1.0 or clip <= 0:
+            raise ValueError("need 0.9 < forgetting <= 1 and clip > 0")
+        self.periods, self.n_harmonics = periods, int(n_harmonics)
+        self.forgetting, self.clip, self.missing = forgetting, clip, missing
+        self.theta_: Optional[np.ndarray] = None
+        self.P_: Optional[np.ndarray] = None
+        self.sigma_: Optional[float] = None
+
+    def _design(self, t: np.ndarray) -> np.ndarray:
+        t = np.asarray(t, dtype=float)
+        cols = [np.ones_like(t)]
+        for p in self.periods:
+            for h in range(1, self.n_harmonics + 1):
+                w = 2.0 * np.pi * h * t / p
+                cols += [np.sin(w), np.cos(w)]
+        return np.column_stack(cols)
+
+    def fit(self, values, t=None) -> "OnlineHarmonicProfile":
+        x = _as_1d(values, self.missing)
+        t = np.arange(x.size) if t is None else np.asarray(t, dtype=int)
+        ok = ~np.isnan(x)
+        phi, y = self._design(t[ok]), x[ok]
+        if y.size < 4 * phi.shape[1]:
+            raise ValueError("fit window too short for this many harmonic terms")
+        w = np.ones(y.size)
+        for _ in range(5):  # Huber IRLS
+            sw = np.sqrt(w)
+            theta = np.linalg.lstsq(phi * sw[:, None], y * sw, rcond=None)[0]
+            r = y - phi @ theta
+            s = max(float(np.median(np.abs(r - np.median(r)))) * _MAD_TO_SD, 1e-9)
+            u = np.abs(r) / (1.5 * s)
+            w = np.where(u <= 1.0, 1.0, 1.0 / u)
+        self.theta_, self.sigma_ = theta, s
+        n_eff = 1.0 / (1.0 - self.forgetting) if self.forgetting < 1 else float(y.size)
+        gram = phi.T @ phi * min(1.0, n_eff / y.size)
+        self.P_ = np.linalg.inv(gram + 1e-9 * np.eye(gram.shape[0]))
+        return self
+
+    def transform(self, values, t=None) -> np.ndarray:
+        if self.theta_ is None:
+            raise RuntimeError("OnlineHarmonicProfile is not fitted")
+        x = _as_1d(values, self.missing)
+        t = np.arange(x.size) if t is None else np.asarray(t, dtype=int)
+        phi = self._design(t)
+        th, P, lam = self.theta_.copy(), self.P_.copy(), self.forgetting
+        c = self.clip * float(self.sigma_)
+        out = np.full(x.size, np.nan)
+        for i in range(x.size):
+            if np.isnan(x[i]):
+                continue
+            f = phi[i]
+            r = x[i] - f @ th
+            out[i] = r
+            e = min(max(r, -c), c)
+            Pf = P @ f
+            k = Pf / (lam + f @ Pf)
+            th = th + k * e
+            P = (P - np.outer(k, Pf)) / lam
+            P = 0.5 * (P + P.T)
+        return out
