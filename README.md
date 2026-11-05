@@ -4,7 +4,8 @@ Research slices on anomaly detection with **honest evaluation**:
 
 1. **Slice 1**: IsolationForest and OneClassSVM on synthetic contaminated Gaussian data, precision@k.
 2. **Slice 2**: causal **streaming detectors** (EWMA, CUSUM, robust z), **point vs point-adjusted vs event-level** metrics, **threshold calibration on a held-out window**, an **IsolationForest vs LOF** benchmark on synthetic plus one public dataset, and a CUSUM check on the public **Nile** series.
-3. **Slice 3 (this PR)**: the same stream under **slow drift and 5% missing data**; a causal **online de-seasonaliser**, an explicit **variance detector**, gap-skipping detectors, **walk-forward thresholds** (label-free rolling quantile and a rescaled held-out threshold) and an **alarm-cost model**, all scored out of sample with paired per-seed effects.
+3. **Slice 3**: the same stream under **slow drift and 5% missing data**; a causal **online de-seasonaliser**, an explicit **variance detector**, gap-skipping detectors, **walk-forward thresholds** (label-free rolling quantile and a rescaled held-out threshold) and an **alarm-cost model**, all scored out of sample with paired per-seed effects.
+4. **Slice 4 (this PR)**: a **second (weekly) seasonality**, a causal **harmonic RLS de-seasonaliser**, a **freezable-reference CUSUM** and a **contamination-robust rolling threshold** (bulk-tail extrapolation), tested against the slice-3 baselines, with the CUSUM allowance re-examined.
 
 **Not a production claim.** Reproducible, offline, seeded demos on planted anomalies plus two small public datasets bundled with scikit-learn / statsmodels.
 
@@ -20,9 +21,151 @@ pytest -q
 python scripts/run_anomaly_slice.py      # slice 1
 python scripts/run_streaming_slice.py    # slice 2 (~16 s on CPU)
 python scripts/run_drift_slice.py        # slice 3 (~30 s on CPU)
+python scripts/run_slice4.py             # slice 4 (~2 min on CPU)
 ```
 
 CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12).
+
+---
+
+## Slice 4 hypotheses
+
+1. A second, longer cycle (weekly over daily) leaks into a one-period de-seasonaliser as level drift. Two sin/cos terms per extra period, fitted by robust recursive least squares, should remove it at no cost when there is no such cycle.
+2. The plain trailing-rank rolling threshold of slice 3 is too conservative because ~5% anomalies sit in its own window. A tail model fitted to the *bulk* quantiles (80% / 90%) should restore the false-alarm rate without labels.
+3. Slice 3 called CUSUM unusable under drift. Part of that may be the reference (a fixed one drifts away; an adaptive one absorbs the shift). A reference that adapts only while calm and freezes while alarmed should fix both.
+4. A second suspect for CUSUM's weakness: with AR(1) noise (phi = 0.6) the textbook allowance k = 0.5 is far too small.
+
+## Slice 4 method
+
+- **Stream**: slice-3 `drift` (trend, random-walk baseline, +50% seasonal amplitude) plus, for `weekly` and `weekly_missing`, a 672-step sinusoid of amplitude 1.5 (`season2_period`, `season2_amp`; off by default, so slices 1-3 streams are unchanged). `weekly_missing` also drops 5% of points in gaps. Same events and labels as before; the cycle is not an anomaly.
+- **De-seasonalisers** (all initialised on the fit window, then causal): `static` and `online` as in slice 3; `harm_d` = `OnlineHarmonicProfile` with period 96; `harm_dw` = periods 96 and 672. The profile is a level plus one sin/cos pair per period, Huber-IRLS on the fit window, then RLS with forgetting 0.995 (memory ~200 steps) on innovations clipped at 2 sigma.
+- **Detectors**: EWMA, robust z, the slice-2 fixed-reference CUSUM at k = 0.5 (`cusum`) and k = 1.5 (`cusum_k15`), `FrozenReferenceCUSUM` at the same two allowances (reference mean/scale adapt only while both sums are below 2, re-anchor after 150 frozen steps) and the slice-3 variance detector.
+- **Thresholds** (target FAR 0.5%): `static_quantile`, `rolling_quantile` (plain trailing rank) and `rolling_rescaled` as in slice 3; `rolling_bulk` = label-free trailing window of 1,200, refreshed every 50 steps, threshold from a half-normal tail (EWMA, robust z) or exponential tail (CUSUM, variance) fitted to the 80% and 90% quantiles. The tail family follows the score type and was fixed before the evaluation seeds were run.
+- **Seeds**: hyper-parameters (forgetting 0.995, anchors 80/90, freeze level 2, k = 1.5) were chosen on development seeds 100-105 only. All tables are 10 evaluation seeds (0-9), out of sample on the test window. Costs, FAR and paired statistics are defined as in slice 3.
+
+## Slice 4 results
+
+### Event F1 / point FAR / cost per 1k by de-seasonaliser, held-out FAR-quantile threshold (test window, mean ± std, 10 seeds)
+
+| scenario | detector | static F1 | online F1 | harm_d F1 | harm_dw F1 | online FAR | harm_dw FAR | cost/1k online | cost/1k harm_dw |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| drift | ewma | 0.721 ± 0.052 | 0.789 ± 0.057 | 0.785 ± 0.063 | 0.797 ± 0.055 | 0.004 | 0.004 | 9.2 | 8.8 |
+| drift | robust_z | 0.869 ± 0.036 | 0.908 ± 0.024 | 0.895 ± 0.032 | 0.897 ± 0.022 | 0.004 | 0.005 | 7.4 | 7.9 |
+| drift | cusum | 0.780 ± 0.329 | 0.139 ± 0.206 | 0.106 ± 0.165 | 0.157 ± 0.212 | 0.015 | 0.008 | 41.4 | 41.1 |
+| drift | cusum_k15 | 0.742 ± 0.238 | 0.422 ± 0.311 | 0.420 ± 0.295 | 0.502 ± 0.216 | 0.009 | 0.004 | 33.3 | 30.6 |
+| drift | cusum_frozen | 0.212 ± 0.204 | 0.214 ± 0.194 | 0.237 ± 0.245 | 0.329 ± 0.242 | 0.021 | 0.046 | 39.9 | 37.3 |
+| drift | cusum_frozen_k15 | 0.348 ± 0.280 | 0.529 ± 0.267 | 0.542 ± 0.221 | 0.596 ± 0.205 | 0.006 | 0.008 | 29.2 | 25.9 |
+| drift | variance | 0.545 ± 0.107 | 0.540 ± 0.107 | 0.536 ± 0.101 | 0.533 ± 0.099 | 0.011 | 0.010 | 29.7 | 30.0 |
+| weekly | ewma | 0.729 ± 0.078 | 0.800 ± 0.049 | 0.779 ± 0.040 | 0.809 ± 0.039 | 0.003 | 0.004 | 10.3 | 8.4 |
+| weekly | robust_z | 0.782 ± 0.084 | 0.798 ± 0.080 | 0.827 ± 0.064 | 0.897 ± 0.023 | 0.007 | 0.006 | 16.2 | 7.9 |
+| weekly | cusum | 0.679 ± 0.305 | 0.262 ± 0.249 | 0.264 ± 0.256 | 0.108 ± 0.197 | 0.113 | 0.000 | 38.3 | 41.9 |
+| weekly | cusum_k15 | 0.454 ± 0.207 | 0.398 ± 0.290 | 0.509 ± 0.241 | 0.790 ± 0.147 | 0.011 | 0.003 | 31.8 | 15.8 |
+| weekly | cusum_frozen | 0.097 ± 0.098 | 0.063 ± 0.108 | 0.075 ± 0.118 | 0.194 ± 0.185 | 0.021 | 0.028 | 43.8 | 40.5 |
+| weekly | cusum_frozen_k15 | 0.203 ± 0.176 | 0.197 ± 0.282 | 0.170 ± 0.228 | 0.599 ± 0.208 | 0.025 | 0.008 | 39.3 | 25.5 |
+| weekly | variance | 0.522 ± 0.094 | 0.531 ± 0.098 | 0.537 ± 0.101 | 0.533 ± 0.099 | 0.011 | 0.011 | 29.9 | 29.9 |
+| weekly_missing | ewma | 0.735 ± 0.060 | 0.769 ± 0.058 | 0.791 ± 0.051 | 0.812 ± 0.061 | 0.005 | 0.005 | 10.7 | 7.9 |
+| weekly_missing | robust_z | 0.770 ± 0.109 | 0.785 ± 0.091 | 0.815 ± 0.062 | 0.891 ± 0.028 | 0.008 | 0.005 | 16.8 | 8.1 |
+| weekly_missing | cusum | 0.591 ± 0.242 | 0.268 ± 0.246 | 0.270 ± 0.239 | 0.132 ± 0.262 | 0.117 | 0.002 | 37.9 | 40.8 |
+| weekly_missing | cusum_k15 | 0.426 ± 0.197 | 0.403 ± 0.300 | 0.449 ± 0.281 | 0.773 ± 0.145 | 0.014 | 0.003 | 31.1 | 16.5 |
+| weekly_missing | cusum_frozen | 0.087 ± 0.083 | 0.086 ± 0.120 | 0.158 ± 0.182 | 0.064 ± 0.139 | 0.035 | 0.018 | 42.7 | 42.8 |
+| weekly_missing | cusum_frozen_k15 | 0.178 ± 0.183 | 0.230 ± 0.277 | 0.247 ± 0.244 | 0.531 ± 0.173 | 0.034 | 0.006 | 38.5 | 29.2 |
+| weekly_missing | variance | 0.507 ± 0.115 | 0.519 ± 0.108 | 0.513 ± 0.108 | 0.512 ± 0.109 | 0.011 | 0.011 | 30.4 | 30.6 |
+
+### Threshold protocols, weekly scenario, harm_dw residuals (mean over 10 seeds)
+
+| detector | protocol | event F1 | point FAR | cost / 1k |
+| --- | --- | ---: | ---: | ---: |
+| ewma | static_quantile | 0.809 | 0.0040 | 8.4 |
+| ewma | rolling_quantile | 0.712 | 0.0003 | 19.2 |
+| ewma | rolling_rescaled | 0.807 | 0.0049 | 8.0 |
+| ewma | rolling_bulk | 0.812 | 0.0040 | 8.1 |
+| robust_z | static_quantile | 0.897 | 0.0055 | 7.9 |
+| robust_z | rolling_quantile | 0.646 | 0.0000 | 24.1 |
+| robust_z | rolling_rescaled | 0.886 | 0.0064 | 8.4 |
+| robust_z | rolling_bulk | 0.893 | 0.0020 | 8.7 |
+| cusum | static_quantile | 0.108 | 0.0001 | 41.9 |
+| cusum | rolling_quantile | 0.330 | 0.0024 | 37.5 |
+| cusum | rolling_rescaled | 0.190 | 0.1281 | 54.7 |
+| cusum | rolling_bulk | 0.334 | 0.0052 | 36.3 |
+| cusum_k15 | static_quantile | 0.790 | 0.0028 | 15.8 |
+| cusum_k15 | rolling_quantile | 0.487 | 0.0009 | 31.6 |
+| cusum_k15 | rolling_rescaled | 0.790 | 0.0028 | 15.8 |
+| cusum_k15 | rolling_bulk | 0.929 | 0.0050 | 6.4 |
+| cusum_frozen | static_quantile | 0.194 | 0.0277 | 40.5 |
+| cusum_frozen | rolling_quantile | 0.299 | 0.0363 | 38.8 |
+| cusum_frozen | rolling_rescaled | 0.170 | 0.0286 | 41.4 |
+| cusum_frozen | rolling_bulk | 0.185 | 0.0155 | 41.1 |
+| cusum_frozen_k15 | static_quantile | 0.599 | 0.0080 | 25.5 |
+| cusum_frozen_k15 | rolling_quantile | 0.290 | 0.0013 | 37.3 |
+| cusum_frozen_k15 | rolling_rescaled | 0.599 | 0.0080 | 25.5 |
+| cusum_frozen_k15 | rolling_bulk | 0.577 | 0.0060 | 26.9 |
+| variance | static_quantile | 0.533 | 0.0109 | 29.9 |
+| variance | rolling_quantile | 0.383 | 0.0006 | 35.8 |
+| variance | rolling_rescaled | 0.508 | 0.0365 | 31.2 |
+| variance | rolling_bulk | 0.351 | 0.0021 | 35.6 |
+
+### Paired per-seed effects (10 seeds; bootstrap 95% CI; exact sign test)
+
+| comparison (b - a) | scenario | detector | metric | mean diff | 95% CI | seeds with diff > 0 | sign p |
+| --- | --- | --- | --- | ---: | :---: | ---: | ---: |
+| harm_dw - online | drift | ewma | event_f1 | +0.008 | [-0.028, +0.043] | 6/10 | 0.754 |
+| harm_dw - online | drift | robust_z | event_f1 | -0.010 | [-0.033, +0.011] | 5/10 | 1.000 |
+| harm_dw - online | weekly | ewma | event_f1 | +0.009 | [-0.029, +0.048] | 5/10 | 1.000 |
+| harm_dw - online | weekly | robust_z | event_f1 | +0.099 | [+0.051, +0.147] | 9/10 | 0.021 |
+| harm_dw - online | drift | ewma | cost_per_1k | -0.363 | [-1.827, +1.089] | 5/10 | 1.000 |
+| harm_dw - online | drift | robust_z | cost_per_1k | +0.455 | [-0.845, +1.846] | 4/10 | 0.754 |
+| harm_dw - online | weekly | ewma | cost_per_1k | -1.937 | [-4.332, +0.356] | 3/10 | 0.344 |
+| harm_dw - online | weekly | robust_z | cost_per_1k | -8.270 | [-11.692, -4.765] | 1/10 | 0.021 |
+| harm_dw - harm_d | drift | robust_z | event_f1 | +0.002 | [-0.011, +0.018] | 4/10 | 0.754 |
+| harm_dw - harm_d | weekly | robust_z | event_f1 | +0.071 | [+0.028, +0.113] | 9/10 | 0.021 |
+| rolling_bulk - static thr | weekly | ewma | event_f1 | +0.003 | [-0.016, +0.023] | 5/10 | 1.000 |
+| rolling_bulk - static thr | weekly | robust_z | event_f1 | -0.004 | [-0.027, +0.018] | 5/10 | 1.000 |
+| rolling_bulk - static thr | weekly | cusum_k15 | event_f1 | +0.139 | [+0.063, +0.220] | 7/10 | 0.016 |
+| rolling_bulk - static thr | weekly | variance | event_f1 | -0.183 | [-0.320, -0.069] | 1/10 | 0.125 |
+| rolling_bulk - plain rolling rank | weekly | ewma | event_f1 | +0.100 | [+0.018, +0.187] | 7/10 | 0.344 |
+| rolling_bulk - plain rolling rank | weekly | robust_z | event_f1 | +0.247 | [+0.201, +0.296] | 10/10 | 0.002 |
+| rolling_bulk - rescaled | weekly | ewma | event_f1 | +0.005 | [-0.044, +0.050] | 5/10 | 1.000 |
+| rolling_bulk - rescaled | weekly | robust_z | event_f1 | +0.007 | [-0.019, +0.030] | 6/10 | 0.754 |
+| CUSUM k 1.5 - k 0.5 | drift | see comparison | event_f1 | +0.346 | [+0.185, +0.507] | 8/10 | 0.039 |
+| CUSUM k 1.5 - k 0.5 | weekly | see comparison | event_f1 | +0.682 | [+0.502, +0.836] | 10/10 | 0.002 |
+| frozen - fixed ref (k 1.5) | drift | see comparison | event_f1 | +0.093 | [-0.076, +0.301] | 5/10 | 1.000 |
+| frozen - fixed ref (k 1.5) | weekly | see comparison | event_f1 | -0.192 | [-0.248, -0.133] | 0/10 | 0.002 |
+| frozen - fixed ref (k 0.5) | drift | see comparison | event_f1 | +0.173 | [+0.046, +0.328] | 6/10 | 0.289 |
+| frozen - fixed ref (k 0.5) | weekly | see comparison | event_f1 | +0.086 | [+0.011, +0.178] | 4/10 | 0.688 |
+| CUSUM k 1.5 - robust z | drift | see comparison | event_f1 | -0.395 | [-0.542, -0.279] | 0/10 | 0.002 |
+| CUSUM k 1.5 - robust z | weekly | see comparison | event_f1 | -0.107 | [-0.191, -0.030] | 3/10 | 0.344 |
+
+### Forgetting factor sensitivity (harm_dw, weekly, static threshold, robust z / cusum_k15 event F1)
+
+| forgetting | memory (steps) | robust_z F1 | robust_z cost/1k | cusum_k15 F1 |
+| ---: | ---: | ---: | ---: | ---: |
+| 0.98 | 50 | 0.884 | 9.2 | 0.822 |
+| 0.99 | 100 | 0.900 | 7.9 | 0.794 |
+| 0.995 | 200 | 0.897 | 7.9 | 0.790 |
+| 0.999 | 1000 | 0.891 | 8.2 | 0.770 |
+
+### Reading the results
+
+- **H1 supported where the cycle exists, neutral where it does not.** With a weekly cycle, robust z with the one-period online profile drops from 0.908 (drift only) to 0.798 event F1 (cost per 1k 7.4 to 16.2). Adding the 672-step terms brings it to 0.897 (+0.099, CI [+0.051, +0.147], 9/10 seeds, p = 0.021; cost 7.9, -8.3 per 1k). Without a weekly cycle the extra terms change nothing measurable (robust z -0.010, CI [-0.033, +0.011]; EWMA +0.008). EWMA gains little (+0.009, CI covers 0), because it adapts quickly to a slow cycle by itself. A daily-only harmonic profile (`harm_d`) is only modestly better than the per-phase `online` profile (0.827 vs 0.798 on weekly) and clearly behind `harm_dw` (-0.071 vs it, 9/10 seeds); the benefit is mainly the second period, not the RLS.
+- **H2 supported for z-type scores.** The plain rolling rank gives robust z a point FAR of 0.0000 and F1 0.646 on `weekly`. The bulk-tail rolling threshold gives 0.893 at point FAR 0.0020 with no labels (+0.247 over the plain rank, 10/10 seeds, p = 0.002) and ties both the static held-out threshold (-0.004, CI [-0.027, +0.018]) and the rescaled one (+0.007). It also helps the accumulated CUSUM score (`cusum_k15` 0.929 vs 0.790, +0.139, 7/10 seeds, p = 0.016). **It hurts the variance detector** (0.351 vs 0.533, -0.183, 1/10 seeds) because that log-ratio score is neither half-normal nor exponential in the tail; it is a model, and the realised FAR (0.002) shows it is conservative there. For EWMA the gain over the plain rank is +0.100 (CI [+0.018, +0.187], 7/10 seeds, p = 0.344).
+- **H3 rejected.** Freezing the reference does not rescue CUSUM. At k = 0.5 the frozen version is still unusable (0.194 on `weekly`, 0.329 on `drift`, both with huge variance; vs 0.108 and 0.157 fixed). At k = 1.5 it is worse than the fixed reference on `weekly` (-0.192, CI [-0.248, -0.133], 0/10 seeds, p = 0.002) and indistinguishable on `drift` (+0.093, CI [-0.076, +0.301]). Once the residuals are de-seasonalised properly there is little drift left for an adaptive reference to remove, and freezing delays the re-anchor after real shifts. `FrozenReferenceCUSUM` stays in the package as a tested but not recommended option.
+- **H4 supported, and it is the main CUSUM finding.** Raising the allowance from 0.5 to 1.5 lifts CUSUM event F1 by +0.346 on `drift` (8/10 seeds, p = 0.039) and +0.682 on `weekly` (10/10, p = 0.002) at `harm_dw`: 0.108 to 0.790. With the bulk-tail rolling threshold `cusum_k15` reaches 0.929 and cost 6.4 per 1k, the best number in the table on `weekly`. Slice 3's "CUSUM is unusable under drift" was therefore mostly a tuning statement about k = 0.5 on autocorrelated noise plus a drifting fit-once reference. Caveats: on `drift` (no weekly cycle) `cusum_k15` is still weak and noisy (0.502 ± 0.216 at `harm_dw`) while robust z stays at 0.897, so CUSUM at k = 1.5 is still behind robust z there (-0.395, 0/10 seeds); on `weekly` the gap is -0.107 (CI [-0.191, -0.030], 3/10, p = 0.344). The k = 1.5 value was chosen on development seeds and the noise model is AR(1) by construction.
+- **Forgetting factor**: 0.98 to 0.999 moves robust z F1 only between 0.884 and 0.900; CUSUM prefers shorter memory (0.822 at 0.98 vs 0.770 at 0.999), i.e. faster tracking also absorbs the per-step noise structure. 0.995 is a compromise, not an optimum.
+
+### Test design (slice 4)
+
+- Stream: `season2_*` off reproduces the old stream bit-for-bit; on, it is an exact additive sinusoid and leaves labels untouched.
+- `OnlineHarmonicProfile`: coefficient recovery on a noiseless-ish series, weekly cycle removal where the one-period profile leaves sd > 0.55, growing amplitude plus ramp tracking, causality (future rewrite), a 30-sd spike barely moves the state, a 40-step 10-sd shift is not absorbed within the event, gaps and validation.
+- `FrozenReferenceCUSUM`: a 4-sd ramp that sends the fixed-reference CUSUM to alarm on >50% of points, freezing keeps a moderate shift visible, re-anchoring after a permanent shift, causality, gaps.
+- `bulk_tail_threshold`: closed forms on exponential and |Gaussian| data, 5% contamination, scale drift, missing placeholders, causality, small samples.
+- Harness: row structure, reproducibility, test labels cannot move any alarm for any protocol, no look-ahead for all four de-seasonalisers, a 3-seed check of the harmonic benefit, and a 4-seed re-check of every directional claim above.
+
+### Limits (slice 4)
+
+- The weekly cycle is an exact sinusoid at a known period. Real streams have non-sinusoidal weekly shapes (weekend dips), holidays and drifting periods; the harmonic profile would need more harmonics and a period estimate.
+- The bulk-tail threshold relies on anomalies filling less than 10% of the window and on the right tail family; the variance detector shows it can fail. Realised FAR must be monitored.
+- CUSUM at k = 1.5 was tuned on the AR(1) coefficient of this simulator; its F1 has a std of 0.15-0.25 across seeds and is noticeably worse on the no-weekly stream. The freezable reference did not help and is untuned beyond a 3 x 3 grid on development seeds.
+- Still synthetic, one noise model, no overlapping incidents, no multi-stream correlation.
 
 ---
 
@@ -238,6 +381,8 @@ Seeds where LOF beats IsolationForest on AP: breast_cancer: k20 0.0, k150 0.5; g
 
 ## Limits / weaknesses
 
+From slices 2-3 (the CUSUM bullet is partly superseded by slice 4):
+
 - The stream is synthetic, with a fixed seasonal period, a stationary AR(1) and cleanly separated events. Real streams have drift, missing data, multiple seasonalities and overlapping incidents.
 - The calibration window holds ~5 events, so supervised threshold tuning is noisy (cal_best_f1 std up to 0.24 on recall). A longer or rolling calibration would be needed.
 - Event-level precision counts alarm segments, not alarmed time. Read it together with point FAR (CUSUM is the cautionary example). Tolerance (20 steps) is a free parameter that favours lagging detectors.
@@ -288,7 +433,8 @@ src/anomaly_lite/
   benchmark.py       # IF vs LOF vs OCSVM tabular benchmark (incl. breast cancer)
   stream_eval.py     # end-to-end streaming harness + Nile CUSUM
   drift_eval.py      # slice 3: drift / missing data x de-seasonalisers x thresholds x costs
-scripts/             # run_anomaly_slice.py, run_streaming_slice.py, run_drift_slice.py
+  slice4_eval.py     # slice 4: weekly cycle, harmonic RLS, freezable CUSUM, bulk-tail rolling thresholds
+scripts/             # run_anomaly_slice.py, run_streaming_slice.py, run_drift_slice.py, run_slice4.py
 tests/
 ```
 

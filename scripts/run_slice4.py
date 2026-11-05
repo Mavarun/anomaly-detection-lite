@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Slice 4: second seasonality, harmonic RLS de-seasonaliser, freezable CUSUM, bulk-tail rolling thresholds.
-Prints the README tables. Offline, 10 evaluation seeds (0-9), ~1.5 min on CPU.
+Prints the README tables. Offline, 10 evaluation seeds (0-9), ~2 min on CPU.
 """
 
 from __future__ import annotations
