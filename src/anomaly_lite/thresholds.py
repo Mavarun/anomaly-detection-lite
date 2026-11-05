@@ -238,3 +238,73 @@ def rolling_rescaled_thresholds(
         m = float(np.median(w)) if w.size >= 10 else m0
         thr[t0 : min(n, t0 + step)] = base_threshold * max(m, 1e-12) / m0
     return thr
+
+
+def bulk_tail_threshold(scores, rate: float = 0.005, lo: float = 0.80, hi: float = 0.90,
+                        tail: str = "exponential") -> float:
+    """Contamination-robust tail threshold from two *bulk* quantiles of an unlabelled sample (slice 4).
+
+    The sample may hold a few percent of anomalies. The plain rank at 1 - ``rate``
+    sits inside them (slice 3: point FAR ~0 on a 5%-prevalence window), whereas
+    the quantiles at ``lo`` and ``hi`` (80% / 90%) still describe normal scores
+    as long as anomalies fill less than ``1 - hi`` of the sample. A tail model
+    fitted to those two quantiles is extrapolated to ``1 - rate``:
+
+    * ``"exponential"``: P(S > u) ~ exp(-(u - q_lo) / b) beyond q_lo, with
+      b = (q_hi - q_lo) / ln((1 - lo) / (1 - hi)); the threshold is
+      q_lo + b ln((1 - lo) / rate). Right for heavy-ish tails.
+    * ``"halfnormal"``: S = sigma |Z| (|z|-type scores); sigma is the mean of the
+      two implied sigmas and the threshold is sigma Phi^-1(1 - rate / 2). Lighter
+      tail, so a lower threshold.
+
+    Returns +inf for fewer than 50 finite scores. Both are models: the realised
+    false-alarm rate is measured, not assumed.
+    """
+    from scipy.stats import norm
+
+    if not 0 < rate < 1 - hi or not 0 < lo < hi < 1:
+        raise ValueError("need 0 < lo < hi < 1 and 0 < rate < 1 - hi")
+    s = np.asarray(scores, dtype=float).ravel()
+    s = s[np.isfinite(s)]
+    if s.size < 50:
+        return float("inf")
+    q_lo, q_hi = np.quantile(s, [lo, hi])
+    if tail == "exponential":
+        b = max(q_hi - q_lo, 1e-12) / np.log((1 - lo) / (1 - hi))
+        return float(q_lo + b * np.log((1 - lo) / rate))
+    if tail == "halfnormal":
+        sig = 0.5 * (q_lo / norm.ppf(1 - (1 - lo) / 2) + q_hi / norm.ppf(1 - (1 - hi) / 2))
+        return float(max(sig, 1e-12) * norm.ppf(1 - rate / 2))
+    raise ValueError("tail must be 'exponential' or 'halfnormal'")
+
+
+def rolling_bulk_tail_thresholds(
+    scores,
+    rate: float = 0.005,
+    window: int = 1200,
+    start: int = 0,
+    step: int = 50,
+    valid=None,
+    tail: str = "exponential",
+    lo: float = 0.80,
+    hi: float = 0.90,
+) -> np.ndarray:
+    """Walk-forward, label-free threshold from :func:`bulk_tail_threshold` on the trailing window.
+
+    Same layout as :func:`rolling_false_alarm_thresholds` (refresh every ``step`` from
+    ``start``, window ``[t0 - window, t0)``, ``valid`` drops missing points, ``nan``
+    before ``start``) but the tail is extrapolated from the 80% / 90% quantiles, so a
+    window holding ~5% anomalies does not push the threshold above them. No labels are used.
+    """
+    s = np.asarray(scores, dtype=float).ravel()
+    n = s.size
+    if window < 50 or step < 1 or not 0 <= start <= n:
+        raise ValueError("need window >= 50, step >= 1 and 0 <= start <= n")
+    ok = np.ones(n, dtype=bool) if valid is None else np.asarray(valid, dtype=bool).ravel()
+    if ok.shape != s.shape:
+        raise ValueError("valid must match scores")
+    thr = np.full(n, np.nan)
+    for t0 in range(start, n, step):
+        lo_i = max(0, t0 - window)
+        thr[t0 : min(n, t0 + step)] = bulk_tail_threshold(s[lo_i:t0][ok[lo_i:t0]], rate, lo, hi, tail)
+    return thr
