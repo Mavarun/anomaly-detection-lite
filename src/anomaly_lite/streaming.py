@@ -539,3 +539,18 @@ class PrewhitenedCUSUM:
             sm = max(0.0, sm - e[t] - self.k)
             out[t] = max(sp, sm)
         return out
+
+
+RECOMMENDED_WEEKLY_HARMONICS = (1, 3)
+
+
+def weekly_harmonic_profile(period: int = 96, week: int = 7 * 96, forgetting: float = 0.995,
+                            harmonics=RECOMMENDED_WEEKLY_HARMONICS, missing: str = "skip") -> OnlineHarmonicProfile:
+    """Recommended de-seasonaliser for a daily plus weekly rhythm (slice 5, pre-registered H1 passed).
+
+    One daily harmonic and three weekly ones. On the slice-5 weekend-dip stream it lifts robust-z
+    event F1 from 0.738 to 0.851 (10/10 evaluation seeds) and costs nothing measurable on a purely
+    sinusoidal week (+0.008, CI [-0.018, +0.037]). EWMA does not benefit (-0.007 to -0.018).
+    ``harmonics=(1, 1)`` gives the slice-4 ``harm_dw`` profile.
+    """
+    return OnlineHarmonicProfile((period, week), harmonics, forgetting, missing=missing)
