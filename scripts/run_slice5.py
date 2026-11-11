@@ -50,7 +50,7 @@ def main(seeds=EVAL_SEEDS) -> dict:
         print(f"| {sc} | " + " | ".join(cells) + " |")
 
     print(f"\n### Paired per-seed effects ({n} seeds; bootstrap 95% CI; exact sign test), static threshold\n")
-    print("| comparison (b - a) | scenario | slice | metric | mean diff | 95% CI | seeds b better | sign p |")
+    print("| comparison (b - a) | scenario | slice | metric | mean diff | 95% CI | seeds with diff > 0 | sign p |")
     print("| --- | --- | --- | --- | ---: | :---: | ---: | ---: |")
     st = long[long.protocol == "static_quantile"]
     rows = []
