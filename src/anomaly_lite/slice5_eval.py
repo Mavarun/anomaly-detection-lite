@@ -34,9 +34,9 @@ from anomaly_lite.stream_data import contiguous_windows, make_drifting_stream
 from anomaly_lite.streaming import (
     CUSUMDetector,
     EWMADetector,
-    OnlineHarmonicProfile,
     PrewhitenedCUSUM,
     RobustZDetector,
+    weekly_harmonic_profile,
 )
 from anomaly_lite import slice4_eval as _s4
 
@@ -79,8 +79,7 @@ def residuals5(x, t, fit, period, how, forgetting=0.995):
         return residuals4(x, t, fit, period, how, forgetting)
     out = residuals4(x, t, fit, period, "static", forgetting)
     rest = slice(fit.stop, None)
-    out[rest] = OnlineHarmonicProfile((period, WEEK), (1, 3), forgetting, missing="skip").fit(
-        x[fit], t[fit]).transform(x[rest], t[rest])
+    out[rest] = weekly_harmonic_profile(period, WEEK, forgetting).fit(x[fit], t[fit]).transform(x[rest], t[rest])
     return out
 
 
