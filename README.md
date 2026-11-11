@@ -5,7 +5,8 @@ Research slices on anomaly detection with **honest evaluation**:
 1. **Slice 1**: IsolationForest and OneClassSVM on synthetic contaminated Gaussian data, precision@k.
 2. **Slice 2**: causal **streaming detectors** (EWMA, CUSUM, robust z), **point vs point-adjusted vs event-level** metrics, **threshold calibration on a held-out window**, an **IsolationForest vs LOF** benchmark on synthetic plus one public dataset, and a CUSUM check on the public **Nile** series.
 3. **Slice 3**: the same stream under **slow drift and 5% missing data**; a causal **online de-seasonaliser**, an explicit **variance detector**, gap-skipping detectors, **walk-forward thresholds** (label-free rolling quantile and a rescaled held-out threshold) and an **alarm-cost model**, all scored out of sample with paired per-seed effects.
-4. **Slice 4 (this PR)**: a **second (weekly) seasonality**, a causal **harmonic RLS de-seasonaliser**, a **freezable-reference CUSUM** and a **contamination-robust rolling threshold** (bulk-tail extrapolation), tested against the slice-3 baselines, with the CUSUM allowance re-examined.
+4. **Slice 4**: a **second (weekly) seasonality**, a causal **harmonic RLS de-seasonaliser**, a **freezable-reference CUSUM** and a **contamination-robust rolling threshold** (bulk-tail extrapolation), tested against the slice-3 baselines, with the CUSUM allowance re-examined.
+5. **Slice 5 (this PR)**: a **non-sinusoidal weekend-dip** weekly shape, **per-period harmonic counts** and an **AR(1)-prewhitened CUSUM** that uses the textbook allowance, with decision rules **pre-registered** before the evaluation seeds were run. Weekly harmonics ship ON; the prewhitened CUSUM ships OFF.
 
 **Not a production claim.** Reproducible, offline, seeded demos on planted anomalies plus two small public datasets bundled with scikit-learn / statsmodels.
 
@@ -22,9 +23,110 @@ python scripts/run_anomaly_slice.py      # slice 1
 python scripts/run_streaming_slice.py    # slice 2 (~16 s on CPU)
 python scripts/run_drift_slice.py        # slice 3 (~30 s on CPU)
 python scripts/run_slice4.py             # slice 4 (~2 min on CPU)
+python scripts/run_slice5.py             # slice 5 (~20 s on CPU)
 ```
 
 CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12).
+
+---
+
+## Slice 5 hypotheses (pre-registered)
+
+Slice 4 left two open weaknesses: its weekly cycle was an exact sinusoid, and the working CUSUM needed an allowance (k = 1.5) tuned on development seeds to this simulator's AR(1) noise. The decision rules below are in `slice5_eval.PREREGISTERED` and were committed before evaluation seeds 0-9 were run. Nothing was tuned; development seeds 100-105 were used only for smoke tests.
+
+1. **H1 (weekly harmonics).** A non-sinusoidal weekly shape (a weekend dip) leaks past one weekly harmonic. Three weekly harmonics (`harm_dw3`, `n_harmonics=(1, 3)`) become the recommended profile iff robust-z event F1 improves on `weekend` on >= 7/10 seeds with a positive mean, and drops by no more than 0.01 on the sinusoidal `weekly` stream.
+2. **H2 (prewhitened CUSUM).** Removing the AR(1) dependence (`PrewhitenedCUSUM`: phi and innovation scale estimated robustly on the reference window) lets the textbook k = 0.5 work without tuning. It replaces `cusum_k15` iff, on the recommended profile with the static threshold, its mean F1 is >= that of `cusum_k15` on both `weekly` and `weekend`, it wins on >= 6/10 seeds in at least one, and its cost per 1k is within 5% on both.
+
+## Slice 5 method
+
+- **Stream**: slice-4 `weekly` (drift plus a 672-step sinusoid, amplitude 1.5); `weekend` = the same drift plus `weekend_shape` (flat weekdays, two dipped weekend days, quarter-day ramps, zero mean, same peak-to-peak range as the sinusoid; `season2_shape="weekend"`); `weekend_missing` adds 5% missing in gaps. Same events and labels; the default `season2_shape="sine"` reproduces the slice-4 stream exactly.
+- **De-seasonalisers**: `harm_dw` (slice 4, one harmonic each for 96 and 672) and `harm_dw3` (one daily, three weekly harmonics; `OnlineHarmonicProfile` now takes one harmonic count per period). Both are fitted on the fit window, then causal RLS with forgetting 0.995.
+- **Detectors**: robust z, EWMA, raw CUSUM at k = 0.5 and k = 1.5, and `cusum_pw` = `PrewhitenedCUSUM` at k = 0.5. For phi = 0.6 a 2-sd level step becomes a 1-sd innovation step, for which k = 0.5 is the classical allowance. Gaps are bridged with a phi^g prediction.
+- **Thresholds**: the static held-out FAR quantile (decides H1/H2) and the slice-4 bulk-tail rolling threshold (context only), target FAR 0.5%. Windows, tolerance (20), cost model and paired statistics (bootstrap 95% CI, exact sign test) as in slices 3-4. 10 evaluation seeds, test window only.
+
+## Slice 5 results
+
+### Event F1 (mean ± std) and cost per 1k, static FAR-quantile threshold, test window, 10 seeds
+
+| scenario | detector | harm_dw F1 | harm_dw3 F1 | harm_dw cost/1k | harm_dw3 cost/1k | harm_dw3 delay |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| weekly | robust_z | 0.897 ± 0.023 | 0.905 ± 0.036 | 7.9 | 7.9 | 4.5 |
+| weekly | ewma | 0.809 ± 0.039 | 0.791 ± 0.056 | 8.4 | 9.4 | 4.1 |
+| weekly | cusum | 0.108 ± 0.197 | 0.075 ± 0.169 | 41.9 | 42.5 | 25.6 |
+| weekly | cusum_k15 | 0.790 ± 0.147 | 0.805 ± 0.133 | 15.8 | 15.5 | 6.6 |
+| weekly | cusum_pw | 0.764 ± 0.047 | 0.771 ± 0.055 | 18.0 | 17.7 | 4.8 |
+| weekend | robust_z | 0.738 ± 0.079 | 0.851 ± 0.077 | 18.7 | 11.1 | 3.3 |
+| weekend | ewma | 0.778 ± 0.068 | 0.772 ± 0.084 | 10.3 | 10.8 | 4.7 |
+| weekend | cusum | 0.132 ± 0.174 | 0.027 ± 0.084 | 41.7 | 43.4 | 16.5 |
+| weekend | cusum_k15 | 0.450 ± 0.169 | 0.709 ± 0.140 | 33.0 | 22.0 | 13.9 |
+| weekend | cusum_pw | 0.744 ± 0.066 | 0.759 ± 0.051 | 19.5 | 18.5 | 5.4 |
+| weekend_missing | robust_z | 0.733 ± 0.101 | 0.856 ± 0.076 | 18.8 | 10.6 | 2.6 |
+| weekend_missing | ewma | 0.774 ± 0.081 | 0.761 ± 0.075 | 11.1 | 10.7 | 4.6 |
+| weekend_missing | cusum | 0.172 ± 0.200 | 0.013 ± 0.040 | 40.7 | 43.7 | 21.0 |
+| weekend_missing | cusum_k15 | 0.421 ± 0.205 | 0.658 ± 0.140 | 33.8 | 23.8 | 12.3 |
+| weekend_missing | cusum_pw | 0.753 ± 0.080 | 0.759 ± 0.063 | 18.6 | 18.6 | 5.7 |
+
+### Bulk-tail rolling threshold (context only), harm_dw3, event F1 / cost per 1k
+
+| scenario | robust_z | ewma | cusum | cusum_k15 | cusum_pw |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| weekly | 0.888 / 9.4 | 0.785 / 9.3 | 0.345 / 36.1 | 0.919 / 7.4 | 0.653 / 23.3 |
+| weekend | 0.866 / 10.6 | 0.777 / 10.1 | 0.150 / 41.1 | 0.726 / 19.4 | 0.635 / 24.2 |
+| weekend_missing | 0.860 / 10.8 | 0.767 / 10.5 | 0.174 / 40.6 | 0.724 / 19.0 | 0.638 / 24.8 |
+
+### Paired per-seed effects (10 seeds; bootstrap 95% CI; exact sign test), static threshold
+
+| comparison (b - a) | scenario | slice | metric | mean diff | 95% CI | seeds with diff > 0 | sign p |
+| --- | --- | --- | --- | ---: | :---: | ---: | ---: |
+| harm_dw3 - harm_dw | weekend | robust_z | event_f1 | +0.113 | [+0.089, +0.137] | 10/10 | 0.002 |
+| harm_dw3 - harm_dw | weekend_missing | robust_z | event_f1 | +0.123 | [+0.068, +0.179] | 9/10 | 0.021 |
+| harm_dw3 - harm_dw | weekly | robust_z | event_f1 | +0.008 | [-0.018, +0.037] | 5/10 | 1.000 |
+| harm_dw3 - harm_dw | weekend | ewma | event_f1 | -0.007 | [-0.036, +0.021] | 4/10 | 0.754 |
+| harm_dw3 - harm_dw | weekend_missing | ewma | event_f1 | -0.013 | [-0.042, +0.014] | 5/10 | 1.000 |
+| harm_dw3 - harm_dw | weekly | ewma | event_f1 | -0.018 | [-0.038, +0.001] | 2/10 | 0.109 |
+| cusum_pw - cusum_k15 | weekend | harm_dw | event_f1 | +0.294 | [+0.187, +0.403] | 9/10 | 0.021 |
+| cusum_pw - cusum_k15 | weekend_missing | harm_dw | event_f1 | +0.332 | [+0.191, +0.474] | 9/10 | 0.021 |
+| cusum_pw - cusum_k15 | weekly | harm_dw | event_f1 | -0.026 | [-0.103, +0.049] | 5/10 | 1.000 |
+| cusum_pw - cusum_k15 | weekend | harm_dw | cost_per_1k | -13.427 | [-17.619, -8.779] | 0/10 | 0.002 |
+| cusum_pw - cusum_k15 | weekend_missing | harm_dw | cost_per_1k | -15.233 | [-20.666, -9.300] | 1/10 | 0.021 |
+| cusum_pw - cusum_k15 | weekly | harm_dw | cost_per_1k | +2.129 | [-2.711, +7.061] | 5/10 | 1.000 |
+| cusum_pw - robust_z | weekend | harm_dw | event_f1 | +0.006 | [-0.041, +0.056] | 6/10 | 0.754 |
+| cusum_pw - robust_z | weekend_missing | harm_dw | event_f1 | +0.020 | [-0.033, +0.080] | 6/10 | 0.754 |
+| cusum_pw - robust_z | weekly | harm_dw | event_f1 | -0.133 | [-0.163, -0.103] | 0/10 | 0.002 |
+| cusum_pw - cusum_k15 | weekend | harm_dw3 | event_f1 | +0.050 | [-0.023, +0.126] | 5/10 | 0.727 |
+| cusum_pw - cusum_k15 | weekend_missing | harm_dw3 | event_f1 | +0.102 | [+0.035, +0.169] | 8/10 | 0.109 |
+| cusum_pw - cusum_k15 | weekly | harm_dw3 | event_f1 | -0.034 | [-0.090, +0.020] | 3/10 | 1.000 |
+| cusum_pw - cusum_k15 | weekend | harm_dw3 | cost_per_1k | -3.531 | [-7.833, +0.547] | 3/10 | 0.344 |
+| cusum_pw - cusum_k15 | weekend_missing | harm_dw3 | cost_per_1k | -5.208 | [-9.272, -1.200] | 2/10 | 0.109 |
+| cusum_pw - cusum_k15 | weekly | harm_dw3 | cost_per_1k | +2.220 | [-1.564, +6.143] | 4/10 | 0.754 |
+| cusum_pw - raw k 0.5 | weekend | harm_dw3 | event_f1 | +0.732 | [+0.681, +0.775] | 10/10 | 0.002 |
+| cusum_pw - raw k 0.5 | weekend_missing | harm_dw3 | event_f1 | +0.747 | [+0.684, +0.792] | 10/10 | 0.002 |
+| cusum_pw - raw k 0.5 | weekly | harm_dw3 | event_f1 | +0.696 | [+0.582, +0.782] | 10/10 | 0.002 |
+| cusum_pw - robust_z | weekend | harm_dw3 | event_f1 | -0.092 | [-0.138, -0.047] | 1/10 | 0.021 |
+| cusum_pw - robust_z | weekend_missing | harm_dw3 | event_f1 | -0.096 | [-0.136, -0.058] | 0/10 | 0.002 |
+| cusum_pw - robust_z | weekly | harm_dw3 | event_f1 | -0.134 | [-0.164, -0.107] | 0/10 | 0.002 |
+
+### Decisions
+
+- **H1 passed: ships ON** as `streaming.weekly_harmonic_profile()` (daily 1 + weekly 3 harmonics). On the weekend dip, robust z goes from 0.738 to 0.851 (+0.113, CI [+0.089, +0.137], 10/10 seeds, p = 0.002) and its cost per 1k from 18.7 to 11.1. On the sinusoidal week it changes nothing measurable (+0.008, CI [-0.018, +0.037], 5/10). With 5% missing data the gain holds (+0.123, 9/10). **EWMA does not benefit** (-0.007 on `weekend`, -0.018 on `weekly`, 2/10 seeds, CI [-0.038, +0.001]): it tracks a slow cycle itself, and the extra parameters add a little RLS noise.
+- **H2 failed: ships OFF.** `PrewhitenedCUSUM` stays a tested option and `cusum_k15` stays the recommended CUSUM. On `harm_dw3` the prewhitened CUSUM is behind on the sinusoidal week (-0.034, CI [-0.090, +0.020], 3/10 seeds; cost +2.2 per 1k, over the 5% budget). On `weekend` it is ahead in the mean (+0.050) but wins only 5/10 seeds. Both failure conditions are real, not borderline on one seed.
+- **What prewhitening does deliver** (reported, not decided): it makes the textbook allowance usable without tuning (+0.70 to +0.75 F1 over raw k = 0.5 on every scenario, 10/10 seeds). It is also **robust to a misfit de-seasonaliser**: with the one-harmonic profile on the weekend dip, `cusum_k15` collapses to 0.450 while `cusum_pw` keeps 0.744 (+0.294, CI [+0.187, +0.403], 9/10 seeds; cost -13.4 per 1k). Its F1 barely moves between the two profiles (0.744 vs 0.759). The reason is that differencing against phi z_(t-1) removes most of a slow leftover cycle. So the tuned k = 1.5 wins when the seasonal model is right and loses badly when it is wrong.
+- **Robust z is still the best single detector.** With the recommended profile it beats `cusum_pw` by 0.09-0.13 F1 on every scenario (0-1/10 seeds for CUSUM) at lower cost. Under the bulk-tail rolling threshold, `cusum_k15` reaches 0.919 on the sinusoidal week (better than robust z's 0.888) but only 0.726 on the weekend dip, and `cusum_pw` loses under that threshold (0.63-0.65): the innovation CUSUM's tail is not well described by the exponential family the rule assumes.
+
+### Test design (slice 5)
+
+- `weekend_shape`: zero mean, range 2, dipped weekend, short ramps, real power beyond the first harmonic; the default stream is bit-identical to slice 4 and the weekend stream differs only by the shape.
+- `PrewhitenedCUSUM`: phi recovery and whitening on AR(1), a null 99.5% tail under half that of raw k = 0.5, a 2-sd step found within 60 steps, near-identity on i.i.d. input, the exact phi^g bridge over gaps, and validation.
+- Per-period harmonics: column count, int/tuple equivalence, a lower weekend-dip residual sd with three weekly harmonics. The factory reproduces slice-4 `harm_dw` with `harmonics=(1, 1)`, and the harness uses it.
+- Harness: pre-registered rules and disjoint seeds, causality of `harm_dw3`, row structure and `decide` on dev seeds, a script smoke test on two dev seeds, and a 4-seed re-check of every directional claim above.
+
+### Weaknesses (slice 5)
+
+- The weekend dip is one synthetic shape at a known 672-step period. There are no holidays, no drifting period and no period estimation. Three weekly harmonics were fixed a priori, not selected, and a sharper dip would need more.
+- H2 failed under its own rule. The prewhitened CUSUM's misfit robustness is a post-hoc reading of reported numbers, not a pre-registered claim. Its exponential bulk-tail threshold fits poorly (F1 0.63-0.65 rolling vs 0.76 static).
+- The prewhitening model is AR(1) because the simulator is AR(1) by construction. Real noise with longer memory or heavy tails would need a higher-order or robust fit, and phi is estimated once on the reference window and never updated.
+- `cusum_k15` is still tuned to this simulator, and its F1 std is 0.13-0.21 across seeds.
+- Still synthetic: one noise model, no overlapping incidents, no multi-stream correlation, and alarm costs are a stylised model.
 
 ---
 
@@ -427,14 +529,15 @@ src/anomaly_lite/
   detectors.py       # IsolationForest, OneClassSVM, LOF wrappers
   metrics.py         # precision@k, random baseline
   stream_data.py     # labelled seasonal AR(1) stream + contiguous windows
-  streaming.py       # causal EWMA / CUSUM / robust-z / variance + static and online seasonal profiles
+  streaming.py       # causal EWMA / CUSUM (raw, frozen, prewhitened) / robust-z / variance + seasonal and harmonic profiles
   event_metrics.py   # point, point-adjusted, event-level metrics, alarm cost
   thresholds.py      # held-out FAR quantile, best-F1, oracle, walk-forward rolling / rescaled
   benchmark.py       # IF vs LOF vs OCSVM tabular benchmark (incl. breast cancer)
   stream_eval.py     # end-to-end streaming harness + Nile CUSUM
   drift_eval.py      # slice 3: drift / missing data x de-seasonalisers x thresholds x costs
   slice4_eval.py     # slice 4: weekly cycle, harmonic RLS, freezable CUSUM, bulk-tail rolling thresholds
-scripts/             # run_anomaly_slice.py, run_streaming_slice.py, run_drift_slice.py, run_slice4.py
+  slice5_eval.py     # slice 5: weekend dip, per-period harmonics, prewhitened CUSUM, pre-registered H1/H2
+scripts/             # run_anomaly_slice.py, run_streaming_slice.py, run_drift_slice.py, run_slice4.py, run_slice5.py
 tests/
 ```
 
