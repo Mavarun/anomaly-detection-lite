@@ -136,6 +136,33 @@ def contiguous_windows(n: int, fractions: tuple[float, ...] = (0.3, 0.2, 0.5)) -
     return [slice(int(a), int(b)) for a, b in zip(cuts[:-1], cuts[1:])]
 
 
+def weekend_shape(t: np.ndarray, period: int, weekend_days: int = 2, ramp_frac: float = 0.25) -> np.ndarray:
+    """Zero-mean weekly shape with peak-to-peak range 2: high on weekdays, dipped on the weekend.
+
+    The week is ``period`` steps of seven days. A step pattern (weekdays at ``h``,
+    the last ``weekend_days`` days at ``l``, ``5h + 2l = 0``, ``h - l = 2``) is
+    smoothed by a circular moving average of ``ramp_frac`` of a day, so the dips
+    start and end with short ramps instead of jumps. A sinusoid with one harmonic
+    can follow only its first Fourier term.
+    """
+    if period < 7 or not 0 < weekend_days < 7 or not 0 <= ramp_frac < 1:
+        raise ValueError("need period >= 7, 0 < weekend_days < 7 and 0 <= ramp_frac < 1")
+    day = period / 7.0
+    phase = np.arange(period)
+    weekday = phase < (7 - weekend_days) * day
+    hi = 2.0 * weekend_days / 7.0
+    lo = hi - 2.0
+    step = np.where(weekday, hi, lo)
+    w = max(int(round(ramp_frac * day)), 1)
+    if w > 1:
+        kern = np.ones(w) / w
+        step = np.real(np.fft.ifft(np.fft.fft(step) * np.fft.fft(kern, period)))
+        step = np.roll(step, -(w // 2))
+    step = step - step.mean()
+    step = 2.0 * step / (step.max() - step.min())
+    return step[np.asarray(t, dtype=int) % period]
+
+
 def make_drifting_stream(
     n: int = 6000,
     trend_sd: float = 3.0,
@@ -146,6 +173,7 @@ def make_drifting_stream(
     random_state: int = 0,
     season2_period: int = 0,
     season2_amp: float = 0.0,
+    season2_shape: str = "sine",
     **kwargs,
 ) -> StreamData:
     """Slice-3 stream: the slice-2 stream plus slow drift and optional missing gaps.
@@ -166,6 +194,11 @@ def make_drifting_stream(
     over a 96-step day) added to the value. A one-period de-seasonaliser sees it as
     slow drift in the level.
 
+    Slice 5 adds ``season2_shape="weekend"``: a non-sinusoidal weekly shape
+    (:func:`weekend_shape`), flat on five "weekdays" and dipped on two "weekend"
+    days with quarter-day ramps, zero mean and the same peak-to-peak range as the
+    sinusoid of the same ``season2_amp``. ``"sine"`` (default) is the slice-4 stream.
+
     Drift is not an anomaly: labels are unchanged. ``frame["observed"]`` marks
     non-missing points. The drift and gap draws use a separate stream
     (``random_state + 10_007``), so ``trend_sd = walk_sd = amp_growth = 0`` and
@@ -177,6 +210,8 @@ def make_drifting_stream(
         raise ValueError("missing_frac must be in [0, 0.5)")
     if season2_period < 0 or season2_amp < 0 or (season2_period == 1):
         raise ValueError("season2_period must be 0 (off) or >= 2 and season2_amp >= 0")
+    if season2_shape not in ("sine", "weekend"):
+        raise ValueError("season2_shape must be 'sine' or 'weekend'")
     base = make_labelled_stream(n=n, random_state=random_state, **kwargs)
     meta = dict(base.meta)
     rng = np.random.default_rng(random_state + 10_007)
@@ -186,8 +221,11 @@ def make_drifting_stream(
     walk = np.cumsum(rng.normal(0.0, walk_sd * sd, size=n)) if walk_sd > 0 else np.zeros(n)
     season = meta["season_amp"] * np.sin(2.0 * np.pi * t / meta["period"])
     extra_season = season * amp_growth * t / max(n - 1, 1)
-    season2 = (season2_amp * np.sin(2.0 * np.pi * t / season2_period + 1.0)
-               if season2_period >= 2 and season2_amp > 0 else np.zeros(n))
+    if season2_period >= 2 and season2_amp > 0:
+        season2 = season2_amp * (np.sin(2.0 * np.pi * t / season2_period + 1.0) if season2_shape == "sine"
+                                 else weekend_shape(t, season2_period))
+    else:
+        season2 = np.zeros(n)
     value = base.values + trend + walk + extra_season + season2
 
     observed = np.ones(n, dtype=bool)
@@ -208,6 +246,6 @@ def make_drifting_stream(
     frame = base.frame.copy()
     frame["value"] = value
     frame["observed"] = observed
-    meta.update({"season2_period": season2_period, "season2_amp": season2_amp, "trend_sd": trend_sd, "walk_sd": walk_sd, "amp_growth": amp_growth,
+    meta.update({"season2_period": season2_period, "season2_amp": season2_amp, "season2_shape": season2_shape, "trend_sd": trend_sd, "walk_sd": walk_sd, "amp_growth": amp_growth,
                  "missing_frac_target": missing_frac, "missing_frac": float(1 - observed.mean())})
     return StreamData(frame=frame, events=base.events, meta=meta)
