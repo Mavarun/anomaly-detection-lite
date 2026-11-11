@@ -455,3 +455,77 @@ class FrozenReferenceCUSUM:
                     frozen = 0
                     self.n_reanchor_ += 1
         return out
+
+
+class PrewhitenedCUSUM:
+    """Two-sided Page CUSUM on AR(1) innovations of the residual (slice 5).
+
+    The textbook allowance k = 0.5 assumes i.i.d. standardised input. On AR(1)
+    noise with coefficient phi the partial sums have variance inflated by about
+    (1 + phi) / (1 - phi) (4x at phi = 0.6), so a k = 0.5 CUSUM on raw residuals
+    alarms constantly; slice 4 papered over this by tuning k to 1.5 on dev seeds.
+    Here the dependence is removed instead. On the reference window (the first
+    ``reference`` points) the residual is standardised by median / MAD, phi is the
+    lag-1 autocorrelation of the standardised reference (clipped to +-0.95), and
+    the innovation scale is the MAD of ``z_t - phi z_{t-1}`` there. Then
+
+        e_t = (z_t - phi^g z_{t-g}) / sd_e      (g = steps since the last observed point)
+
+    feeds an ordinary two-sided CUSUM with allowance ``k`` (in innovation sd).
+    A level shift of delta (in residual sd) becomes an innovation mean shift of
+    delta (1 - phi) / sqrt(1 - phi^2): for phi = 0.6 a 2-sd step is a 1-sd
+    innovation step, for which k = 0.5 is the classical choice. Cost: the
+    sustained signal is smaller than the raw one by (1 - phi), so slow or short
+    shifts are found later, and a single spike also produces a negative echo
+    -phi spike on the next step.
+    """
+
+    def __init__(self, k: float = 0.5, reference: int = 500, max_phi: float = 0.95,
+                 missing: str = "raise") -> None:
+        if k < 0 or not 0 <= max_phi < 1:
+            raise ValueError("need k >= 0 and 0 <= max_phi < 1")
+        self.k, self.reference, self.max_phi, self.missing = k, reference, max_phi, missing
+        self.mu_: Optional[float] = None
+        self.sd_: Optional[float] = None
+        self.phi_: Optional[float] = None
+        self.sd_e_: Optional[float] = None
+
+    def innovations(self, values) -> np.ndarray:
+        x = _as_1d(values, self.missing)
+        ref = x[: min(self.reference, x.size)]
+        ok = ~np.isnan(ref)
+        if ok.sum() < 10:
+            raise ValueError("prewhitened CUSUM reference window needs >= 10 observed points")
+        med = float(np.median(ref[ok]))
+        self.mu_ = med
+        self.sd_ = max(float(np.median(np.abs(ref[ok] - med))) * _MAD_TO_SD, 1e-12)
+        zr = (ref - med) / self.sd_
+        pair = ~np.isnan(zr[1:]) & ~np.isnan(zr[:-1])
+        a, b = zr[1:][pair], zr[:-1][pair]
+        phi = float(np.sum(a * b) / max(np.sum(b * b), 1e-12)) if pair.sum() >= 5 else 0.0
+        self.phi_ = float(np.clip(phi, -self.max_phi, self.max_phi))
+        er = a - self.phi_ * b
+        self.sd_e_ = max(float(np.median(np.abs(er - np.median(er)))) * _MAD_TO_SD, 1e-12)
+        z = (x - med) / self.sd_
+        out = np.full(x.size, np.nan)
+        last, gap = np.nan, 0
+        for t in range(x.size):
+            if np.isnan(z[t]):
+                gap += 1
+                continue
+            pred = 0.0 if np.isnan(last) else (self.phi_ ** (gap + 1)) * last
+            out[t] = (z[t] - pred) / self.sd_e_
+            last, gap = z[t], 0
+        return out
+
+    def score(self, values) -> np.ndarray:
+        e = self.innovations(values)
+        sp = sm = 0.0
+        out = np.zeros(e.size)
+        for t in range(e.size):
+            if np.isnan(e[t]):
+                continue
+            sp = max(0.0, sp + e[t] - self.k)
+            sm = max(0.0, sm - e[t] - self.k)
+            out[t] = max(sp, sm)
+        return out
