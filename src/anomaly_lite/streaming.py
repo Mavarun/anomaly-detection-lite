@@ -312,16 +312,26 @@ class OnlineHarmonicProfile:
     ``t`` must be the absolute time index. Costs: a coarse sinusoid can not
     follow a non-sinusoidal pattern with ``n_harmonics`` = 1, and a long event
     is partly absorbed into the level at a rate capped by the clip.
+
+    Slice 5: ``n_harmonics`` may be a tuple with one count per period, e.g.
+    ``periods=(96, 672), n_harmonics=(1, 3)`` keeps the daily sinusoid and gives
+    the weekly cycle three harmonics (a non-sinusoidal weekend dip) for four more
+    parameters.
     """
 
     def __init__(self, periods=(96,), n_harmonics: int = 1, forgetting: float = 0.995,
                  clip: float = 2.0, missing: str = "raise") -> None:
         periods = tuple(int(p) for p in np.atleast_1d(periods))
-        if not periods or min(periods) < 2 or n_harmonics < 1:
-            raise ValueError("need periods >= 2 and n_harmonics >= 1")
+        harm = tuple(int(h) for h in np.atleast_1d(n_harmonics))
+        if len(harm) == 1:
+            harm = harm * len(periods)
+        if not periods or min(periods) < 2 or len(harm) != len(periods) or min(harm) < 1:
+            raise ValueError("need periods >= 2 and n_harmonics >= 1 (one int, or one per period)")
         if not 0.9 < forgetting <= 1.0 or clip <= 0:
             raise ValueError("need 0.9 < forgetting <= 1 and clip > 0")
-        self.periods, self.n_harmonics = periods, int(n_harmonics)
+        self.periods = periods
+        self.harmonics = harm  # per period (slice 5); n_harmonics kept for the old single-int API
+        self.n_harmonics = harm[0] if len(set(harm)) == 1 else harm
         self.forgetting, self.clip, self.missing = forgetting, clip, missing
         self.theta_: Optional[np.ndarray] = None
         self.P_: Optional[np.ndarray] = None
@@ -330,8 +340,8 @@ class OnlineHarmonicProfile:
     def _design(self, t: np.ndarray) -> np.ndarray:
         t = np.asarray(t, dtype=float)
         cols = [np.ones_like(t)]
-        for p in self.periods:
-            for h in range(1, self.n_harmonics + 1):
+        for p, nh in zip(self.periods, self.harmonics):
+            for h in range(1, nh + 1):
                 w = 2.0 * np.pi * h * t / p
                 cols += [np.sin(w), np.cos(w)]
         return np.column_stack(cols)
