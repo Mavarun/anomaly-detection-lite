@@ -1,0 +1,41 @@
+{
+  "H1": false,
+  "H1_parts": {
+    "t3_gain": false,
+    "gauss_ok": true,
+    "cost_ok": false
+  },
+  "H1_t3": {
+    "scenario": "weekend_t3",
+    "deseason": "harm_dw3",
+    "protocol": "static_quantile",
+    "metric": "event_f1",
+    "diff_mean": -0.11587795587109895,
+    "ci_lo": -0.2212076631047605,
+    "ci_hi": 0.011052397086804824,
+    "n_b_better": 2,
+    "n_ties": 0,
+    "n_seeds": 10,
+    "sign_p": 0.109375
+  },
+  "H1_gauss": {
+    "scenario": "weekend",
+    "deseason": "harm_dw3",
+    "protocol": "static_quantile",
+    "metric": "event_f1",
+    "diff_mean": 0.04333874193994647,
+    "ci_lo": 0.01737842982686012,
+    "ci_hi": 0.06998205891298495,
+    "n_b_better": 6,
+    "n_ties": 2,
+    "n_seeds": 10,
+    "sign_p": 0.2890625
+  },
+  "H2": false,
+  "robust_z_f1": {
+    "weekend": 0.8510422195988155,
+    "weekend_t3": 0.7305965699142091,
+    "weekend_t5": 0.8213229145654992
+  },
+  "recommended_clip": null
+}
