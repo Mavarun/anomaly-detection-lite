@@ -6,7 +6,8 @@ Research slices on anomaly detection with **honest evaluation**:
 2. **Slice 2**: causal **streaming detectors** (EWMA, CUSUM, robust z), **point vs point-adjusted vs event-level** metrics, **threshold calibration on a held-out window**, an **IsolationForest vs LOF** benchmark on synthetic plus one public dataset, and a CUSUM check on the public **Nile** series.
 3. **Slice 3**: the same stream under **slow drift and 5% missing data**; a causal **online de-seasonaliser**, an explicit **variance detector**, gap-skipping detectors, **walk-forward thresholds** (label-free rolling quantile and a rescaled held-out threshold) and an **alarm-cost model**, all scored out of sample with paired per-seed effects.
 4. **Slice 4**: a **second (weekly) seasonality**, a causal **harmonic RLS de-seasonaliser**, a **freezable-reference CUSUM** and a **contamination-robust rolling threshold** (bulk-tail extrapolation), tested against the slice-3 baselines, with the CUSUM allowance re-examined.
-5. **Slice 5 (this PR)**: a **non-sinusoidal weekend-dip** weekly shape, **per-period harmonic counts** and an **AR(1)-prewhitened CUSUM** that uses the textbook allowance, with decision rules **pre-registered** before the evaluation seeds were run. Weekly harmonics ship ON; the prewhitened CUSUM ships OFF.
+5. **Slice 5**: a **non-sinusoidal weekend-dip** weekly shape, **per-period harmonic counts** and an **AR(1)-prewhitened CUSUM** that uses the textbook allowance, with decision rules **pre-registered** before the evaluation seeds were run. Weekly harmonics ship ON; the prewhitened CUSUM ships OFF.
+6. **Slice 6 (this PR)**: **heavy-tailed (Student-t) noise** and a **clipped prewhitened CUSUM**, both rules pre-registered. The clip ships OFF, and the shipped robust z fails its heavy-tail guardrail (0.851 -> 0.731 F1 under t(3)).
 
 **Not a production claim.** Reproducible, offline, seeded demos on planted anomalies plus two small public datasets bundled with scikit-learn / statsmodels.
 
@@ -24,9 +25,57 @@ python scripts/run_streaming_slice.py    # slice 2 (~16 s on CPU)
 python scripts/run_drift_slice.py        # slice 3 (~30 s on CPU)
 python scripts/run_slice4.py             # slice 4 (~2 min on CPU)
 python scripts/run_slice5.py             # slice 5 (~20 s on CPU)
+python scripts/run_slice6.py             # slice 6 (~10 s on CPU)
 ```
 
 CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12).
+
+---
+
+## Slice 6 (heavy-tailed noise): hypotheses (pre-registered)
+
+Slice 5 said every stream so far had Gaussian innovations. This slice keeps the slice-5 `weekend` stream and only swaps the innovation law for a unit-variance Student-t (`make_labelled_stream(noise_df=...)`): same marginal sd, AR(1) coefficient, events and labels, so any loss comes from the tails. The rules below are in `slice6_eval.PREREGISTERED` and were committed before evaluation seeds 0-9 were run on any heavy-tailed stream.
+
+1. **H1 (clipped prewhitened CUSUM).** `PrewhitenedCUSUM(clip=3.0)` (`cusum_pwc`, each standardised innovation capped at ±3 before the sums) becomes the recommended setting iff, on harm_dw3 with the static threshold, its mean event F1 beats `clip=None` on `weekend_t3` with >= 7/10 seeds better, loses no more than 0.01 on Gaussian `weekend`, and its cost per 1k on `weekend_t3` is no higher.
+2. **H2 (guardrail on what ships).** The shipped robust z + harm_dw3 loses no more than 0.10 event F1 going from Gaussian `weekend` to `weekend_t3`. A failure ships nothing and is reported as a weakness.
+
+## Slice 6 results (`python scripts/run_slice6.py`, ~10 s; `artifacts/slice6_report.md`)
+
+### Event F1 (mean ± std) and cost per 1k, harm_dw3, static threshold, 10 seeds
+
+| scenario | robust_z | cusum_k15 | cusum_pw | cusum_pwc |
+| --- | ---: | ---: | ---: | ---: |
+| weekend (Gaussian) | 0.851 ± 0.077 / 11.1 | 0.709 ± 0.140 / 22.0 | 0.759 ± 0.051 / 18.5 | 0.802 ± 0.075 / 16.2 |
+| weekend_t5 | 0.821 ± 0.059 / 12.7 | 0.607 ± 0.288 / 24.2 | 0.760 ± 0.049 / 18.4 | 0.692 ± 0.105 / 22.4 |
+| weekend_t3 | 0.731 ± 0.179 / 18.2 | 0.368 ± 0.292 / 34.7 | 0.694 ± 0.229 / 21.3 | 0.578 ± 0.156 / 28.5 |
+
+The Gaussian row reproduces the slice-5 harm_dw3 numbers exactly (a test checks this).
+
+### Paired effect of the clip (cusum_pwc - cusum_pw), 10 seeds
+
+| scenario | event F1 diff | 95% CI | seeds better | cost/1k diff |
+| --- | ---: | :---: | ---: | ---: |
+| weekend | +0.043 | [+0.017, +0.070] | 6/10 | -2.2 |
+| weekend_t5 | -0.068 | [-0.111, -0.023] | 2/10 | +4.0 |
+| weekend_t3 | -0.116 | [-0.219, +0.006] | 2/10 | +7.1 |
+
+### Decisions
+
+- **H1 fails, the clip ships OFF** (`clip=None` stays the default). It helps only on Gaussian noise, the case it was not built for, and hurts under both heavy-tailed laws.
+- **H2 fails.** Robust z drops from 0.851 to 0.731 under t(3) (-0.120, budget 0.10). Nothing changes in what ships; this is now the main known weakness of the recommended detector.
+
+### Post-hoc reading (decides nothing; `artifacts/slice6_posthoc.csv`)
+
+- Tail draws in the calibration window push every static threshold up: robust z 2.89 -> 4.52, `cusum_pwc` 3.40 -> 5.81, `cusum_k15` 5.15 -> 12.33.
+- The clip fails for a mechanical reason: it caps a spike's push at c - k = 2.5 per step, which is under the t(3) threshold, so `cusum_pwc` spike recall falls from 0.543 to 0.117. Bounding single draws only helps if the threshold does not move as well.
+- Robust z mostly loses level shifts (recall 0.525 -> 0.322) and some spikes (1.000 -> 0.877).
+
+### Weaknesses (slice 6)
+
+- One heavy-tailed law (scaled Student-t) and one clip value, fixed in advance. No clip was tuned, and a clip tied to the threshold, or a heavy-tail-aware threshold (for example fitting the calibration tail with a t or GPD), was not tried.
+- The calibration window is 20% of 6000 points, so at a 0.5% target rate the threshold rests on about 6 tail points. That is a big part of why t(3) moves it so much.
+- Results are on 10 seeds with seed-level std of 0.15-0.29 for the CUSUMs under t(3); the clip's t(3) CI touches zero.
+- Still synthetic: same AR(1) simulator, no real heavy-tailed data.
 
 ---
 
@@ -537,7 +586,8 @@ src/anomaly_lite/
   drift_eval.py      # slice 3: drift / missing data x de-seasonalisers x thresholds x costs
   slice4_eval.py     # slice 4: weekly cycle, harmonic RLS, freezable CUSUM, bulk-tail rolling thresholds
   slice5_eval.py     # slice 5: weekend dip, per-period harmonics, prewhitened CUSUM, pre-registered H1/H2
-scripts/             # run_anomaly_slice.py, run_streaming_slice.py, run_drift_slice.py, run_slice4.py, run_slice5.py
+  slice6_eval.py     # slice 6: Student-t noise, clipped prewhitened CUSUM (OFF), robust-z guardrail; post-hoc breakdown
+scripts/             # run_anomaly_slice.py, run_streaming_slice.py, run_drift_slice.py, run_slice4.py, run_slice5.py, run_slice6.py
 tests/
 ```
 
