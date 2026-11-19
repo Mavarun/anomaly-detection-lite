@@ -28,5 +28,23 @@ def main() -> None:
     print(json.dumps(d, indent=2, default=float))
 
 
+
+
+def posthoc() -> None:
+    """Post-hoc reading (after the decisions were written)."""
+    import pandas as pd
+
+    from anomaly_lite.slice7_eval import posthoc_threshold_reading
+
+    long = pd.read_csv(ART / "slice7_long.csv")
+    a = posthoc_threshold_reading(long).assign(dropped="none")
+    b = posthoc_threshold_reading(long, drop_seed=308).assign(dropped="308")
+    out = pd.concat([a, b], ignore_index=True).round(4)
+    out.to_csv(ART / "slice7_posthoc.csv", index=False)
+    print(out.to_string(index=False))
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    posthoc() if "--posthoc" in sys.argv else main()

@@ -33,3 +33,11 @@ def test_dev_smoke():
     df = S7.run_slice7_experiment(S7.DEV_SEEDS[0], "weekend_t3")
     assert set(df.protocol) == set(S7.PROTOCOLS7) and set(df.detector) == set(S7.DETECTORS7)
     assert df.threshold.notna().all()
+
+
+def test_posthoc_reading_drops_one_seed():
+    df = pd.concat([S7.run_slice7_experiment(s, "weekend") for s in S7.DEV_SEEDS[:2]], ignore_index=True)
+    full = S7.posthoc_threshold_reading(df)
+    one = S7.posthoc_threshold_reading(df, drop_seed=S7.DEV_SEEDS[1])
+    assert len(full) == len(one) == 6
+    assert one.threshold_sd.isna().all() and full.threshold_sd.notna().all()
