@@ -278,6 +278,40 @@ def bulk_tail_threshold(scores, rate: float = 0.005, lo: float = 0.80, hi: float
     raise ValueError("tail must be 'exponential' or 'halfnormal'")
 
 
+def gpd_tail_threshold(scores, rate: float = 0.005, tail_frac: float = 0.10, min_exceed: int = 30,
+                       xi_bounds: tuple[float, float] = (-0.5, 0.5)) -> float:
+    """Peaks-over-threshold quantile: a generalized Pareto fit to the top ``tail_frac`` of normal scores (slice 7).
+
+    The empirical rank at 1 - ``rate`` rests on ``rate * n`` points (about 6 for slice 6's
+    calibration window), so one heavy-tailed draw can move it a long way. Here the
+    ``tail_frac`` quantile ``u`` is the base, the excesses over ``u`` get a GPD fitted by
+    maximum likelihood with location 0, and the threshold is
+    ``u + GPD.ppf(1 - rate / tail_frac)``. The shape is clipped to ``xi_bounds`` so that a
+    handful of extreme excesses cannot send it to infinity. With fewer than ``min_exceed``
+    excesses it falls back to :func:`false_alarm_threshold`. A model, not a guarantee: the
+    realised false-alarm rate is measured.
+    """
+    from scipy.stats import genpareto
+
+    if not 0 < rate < tail_frac < 1:
+        raise ValueError("need 0 < rate < tail_frac < 1")
+    s = np.asarray(scores, dtype=float).ravel()
+    s = s[np.isfinite(s)]
+    if s.size == 0:
+        raise ValueError("no finite calibration scores")
+    u = float(np.quantile(s, 1 - tail_frac))
+    exc = s[s > u] - u
+    if exc.size < min_exceed:
+        return false_alarm_threshold(s, rate)
+    xi, _, scale = genpareto.fit(exc, floc=0.0)
+    lo, hi = xi_bounds
+    if not lo <= xi <= hi:
+        xi = float(np.clip(xi, lo, hi))
+        # refit the scale with the shape held at the bound
+        _, _, scale = genpareto.fit(exc, f0=xi, floc=0.0)
+    return float(u + genpareto.ppf(1 - rate / tail_frac, xi, loc=0.0, scale=scale))
+
+
 def rolling_bulk_tail_thresholds(
     scores,
     rate: float = 0.005,
