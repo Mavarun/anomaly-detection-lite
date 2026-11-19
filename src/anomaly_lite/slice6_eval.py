@@ -106,3 +106,36 @@ def decide(long: pd.DataFrame) -> dict:
     return {"H1": all(h1_parts.values()), "H1_parts": h1_parts, "H1_t3": t3.to_dict(), "H1_gauss": g.to_dict(),
             "H2": h2, "robust_z_f1": {k: float(v) for k, v in f1.items()},
             "recommended_clip": CLIP if all(h1_parts.values()) else None}
+
+
+def posthoc_breakdown(seeds: Iterable[int] = EVAL_SEEDS, scenarios: Iterable[str] = ("weekend", "weekend_t3"),
+                      n: int = 6000, n_events: int = 24, rate: float = 0.005, tolerance: int = 20) -> pd.DataFrame:
+    """Post-hoc reading that decides nothing: per-type recall, false alarms and the calibrated threshold.
+
+    Run after :func:`decide` on the same evaluation seeds, to see *where* heavy tails hurt: missed
+    events of one type, more false alarms, or a threshold pushed up by tail draws in the
+    calibration window.
+    """
+    from anomaly_lite.event_metrics import alarm_cost
+    from anomaly_lite.stream_eval import _type_recall
+    from anomaly_lite.thresholds import false_alarm_threshold
+
+    rows = []
+    for sc in scenarios:
+        for seed in seeds:
+            stream = make_drifting_stream(n=n, n_events=n_events, warmup=600, min_gap=80, random_state=seed,
+                                          **SCENARIOS6[sc])
+            fit, cal, test = contiguous_windows(n, (0.3, 0.2, 0.5))
+            t, x, y = stream.frame["t"].to_numpy(), stream.values, stream.labels
+            obs = stream.frame["observed"].to_numpy()
+            eid = stream.frame["event_id"].to_numpy()
+            resid = residuals5(x, t, fit, stream.meta["period"], "harm_dw3")
+            keep = obs[cal] & (y[cal] == 0)
+            for det, s in score6(resid, fit.stop - fit.start).items():
+                thr = false_alarm_threshold(s[cal][keep], rate)
+                pred = (s[test] > thr).astype(int)
+                c = alarm_cost(y[test], pred, tolerance)
+                rows.append({"seed": seed, "scenario": sc, "detector": det, "threshold": float(thr),
+                             "n_false": c.n_false, "n_missed": c.n_missed,
+                             **_type_recall(y[test], pred, eid[test], stream.events, tolerance)})
+    return pd.DataFrame(rows)
