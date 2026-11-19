@@ -100,3 +100,14 @@ def decide(long: pd.DataFrame) -> dict:
     return {"H1": all(parts.values()), "H1_parts": parts, "H1_t3": t3.to_dict(), "H1_gauss": g.to_dict(),
             "chosen": chosen, "H2": bool(f1["weekend_t3"] >= f1["weekend"] - 0.10),
             "robust_z_f1_chosen": {k: float(v) for k, v in f1.items()}}
+
+
+def posthoc_threshold_reading(long: pd.DataFrame, drop_seed: int | None = None) -> pd.DataFrame:
+    """POST-HOC (written after the evaluation run): threshold spread across seeds, realised FAR and the
+    precision/recall split per rule; ``drop_seed`` repeats the robust_z means without one seed."""
+    d = long if drop_seed is None else long[long.seed != drop_seed]
+    return (d.groupby(["scenario", "detector", "protocol"])
+            .agg(threshold_mean=("threshold", "mean"), threshold_sd=("threshold", "std"),
+                 realised_far=("realised_far", "mean"), precision=("event_precision", "mean"),
+                 recall=("event_recall", "mean"), event_f1=("event_f1", "mean"))
+            .reset_index())
