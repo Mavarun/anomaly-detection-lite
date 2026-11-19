@@ -74,10 +74,19 @@ def make_labelled_stream(
     min_gap: int = 120,
     event_types: tuple[str, ...] = EVENT_TYPES,
     random_state: int = 0,
+    noise_df: float = 0.0,
 ) -> StreamData:
-    """Generate one labelled stream; see module docstring for the model."""
+    """Generate one labelled stream; see module docstring for the model.
+
+    ``noise_df`` (slice 6): 0 (default) draws Gaussian innovations and reproduces every
+    earlier slice exactly. A value > 2 draws Student-t innovations with that many degrees of
+    freedom, rescaled to unit variance, so the marginal sd, the event magnitudes (which are
+    in marginal-sd units) and the AR(1) structure are unchanged and only the tails get heavier.
+    """
     if not 0 <= ar_phi < 1:
         raise ValueError("ar_phi must be in [0, 1)")
+    if noise_df != 0 and not noise_df > 2:
+        raise ValueError("noise_df must be 0 (Gaussian) or > 2 (finite-variance Student-t)")
     unknown = set(event_types) - set(EVENT_TYPES)
     if unknown:
         raise ValueError(f"unknown event types: {sorted(unknown)}")
@@ -106,7 +115,10 @@ def make_labelled_stream(
         records.append({"event_id": k, "start": s, "end": e, "type": kind,
                         "magnitude": float(mag), "length": e - s + 1})
 
-    eps = rng.normal(size=n)
+    if noise_df:
+        eps = rng.standard_t(noise_df, size=n) * np.sqrt((noise_df - 2.0) / noise_df)
+    else:
+        eps = rng.normal(size=n)
     noise = np.empty(n)
     prev = rng.normal(0.0, marginal_sd)
     for t in range(n):
@@ -119,7 +131,8 @@ def make_labelled_stream(
     frame = pd.DataFrame({"t": t_idx, "value": value, "label": label, "event_id": event_id})
     meta = {"n": n, "period": period, "season_amp": season_amp, "ar_phi": ar_phi,
             "noise_sd": noise_sd, "marginal_sd": float(marginal_sd), "n_events": n_events,
-            "warmup": warmup, "prevalence": float(label.mean()), "random_state": random_state}
+            "warmup": warmup, "prevalence": float(label.mean()), "random_state": random_state,
+            "noise_df": float(noise_df)}
     return StreamData(frame=frame, events=records, meta=meta)
 
 
