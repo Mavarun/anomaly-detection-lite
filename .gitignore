@@ -13,3 +13,4 @@ venv/
 *.csv
 !tests/fixtures/
 .DS_Store
+!artifacts/*.csv
