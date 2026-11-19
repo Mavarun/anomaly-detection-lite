@@ -1,0 +1,46 @@
+{
+  "preregistered": {
+    "H1_gpd_for_robust_z": "The recommended static threshold for the shipped robust_z + harm_dw3 becomes static_gpd iff, on evaluation seeds 300-309: mean event-F1(static_gpd - static_quantile) > 0 on 'weekend_t3' with gpd better on >= 7 of 10 seeds, AND >= -0.01 on Gaussian 'weekend', AND mean cost_per_1k on 'weekend_t3' is no higher. Otherwise static_quantile stays.",
+    "H2_guardrail_with_the_chosen_rule": "With the rule H1 picks, robust_z's mean event F1 on 'weekend_t3' is >= its Gaussian 'weekend' F1 - 0.10 (slice 6's guardrail, failed there at -0.120). A failure ships nothing more and stays a weakness.",
+    "reported_not_decided": "weekend_t5, the CUSUMs under both rules, the thresholds and the realised FAR."
+  },
+  "H1": false,
+  "H1_parts": {
+    "t3_gain": false,
+    "gauss_ok": true,
+    "cost_ok": true
+  },
+  "H1_t3": {
+    "scenario": "weekend_t3",
+    "deseason": "harm_dw3",
+    "detector": "robust_z",
+    "metric": "event_f1",
+    "diff_mean": 0.01068557583520191,
+    "ci_lo": -0.012946147675866057,
+    "ci_hi": 0.04686110966641724,
+    "n_b_better": 2,
+    "n_ties": 0,
+    "n_seeds": 10,
+    "sign_p": 0.109375
+  },
+  "H1_gauss": {
+    "scenario": "weekend",
+    "deseason": "harm_dw3",
+    "detector": "robust_z",
+    "metric": "event_f1",
+    "diff_mean": 0.0027174735555014484,
+    "ci_lo": -0.0027930022946995128,
+    "ci_hi": 0.009738372882037414,
+    "n_b_better": 3,
+    "n_ties": 1,
+    "n_seeds": 10,
+    "sign_p": 0.5078125
+  },
+  "chosen": "static_quantile",
+  "H2": false,
+  "robust_z_f1_chosen": {
+    "weekend": 0.8547834637544351,
+    "weekend_t3": 0.7519138003075773,
+    "weekend_t5": 0.8094194598577891
+  }
+}
