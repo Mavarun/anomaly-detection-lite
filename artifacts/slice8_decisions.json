@@ -1,0 +1,17 @@
+{
+  "preregistered": {
+    "H1_guardrail_reachable": "On seeds 400-409, robust_z + harm_dw3 with the per-seed oracle threshold reaches mean event F1 on 'weekend_t3' >= (mean F1 of the shipped static_quantile on Gaussian 'weekend') - 0.10. If not, no static threshold can pass the guardrail for this detector, and threshold work stops being the route to it.",
+    "H2_headroom": "The oracle's mean t3 F1 gain over static_quantile is reported with a paired bootstrap CI; if the CI's upper end is below 0.05, threshold choice is recorded as exhausted for t3 (any better static rule gains < 0.05).",
+    "reported_not_decided": "weekend_t5 and the CUSUMs; the oracle's own Gaussian F1; the oracle threshold's quantile."
+  },
+  "H1": true,
+  "gauss_static_f1": 0.8412821570984503,
+  "t3_oracle_f1": 0.7946803131969074,
+  "t3_static_f1": 0.7176711037641609,
+  "t3_gain": 0.07700920943274643,
+  "t3_gain_ci": [
+    0.05006331739434595,
+    0.10396849753702257
+  ],
+  "H2_exhausted": false
+}
