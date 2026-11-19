@@ -488,13 +488,21 @@ class PrewhitenedCUSUM:
     sustained signal is smaller than the raw one by (1 - phi), so slow or short
     shifts are found later, and a single spike also produces a negative echo
     -phi spike on the next step.
+
+    Slice 6 adds ``clip`` (default None: unchanged). With heavy-tailed noise a single large
+    innovation can push the sum past the threshold on its own; ``clip = c`` caps each
+    standardised innovation at +-c before it enters the sums (a Huber-type CUSUM). A sustained
+    shift of delta < c innovation sd is unaffected; a lone spike contributes at most c - k.
     """
 
     def __init__(self, k: float = 0.5, reference: int = 500, max_phi: float = 0.95,
-                 missing: str = "raise") -> None:
+                 missing: str = "raise", clip: Optional[float] = None) -> None:
         if k < 0 or not 0 <= max_phi < 1:
             raise ValueError("need k >= 0 and 0 <= max_phi < 1")
+        if clip is not None and not clip > k:
+            raise ValueError("clip must be None or > k")
         self.k, self.reference, self.max_phi, self.missing = k, reference, max_phi, missing
+        self.clip = clip
         self.mu_: Optional[float] = None
         self.sd_: Optional[float] = None
         self.phi_: Optional[float] = None
@@ -530,6 +538,8 @@ class PrewhitenedCUSUM:
 
     def score(self, values) -> np.ndarray:
         e = self.innovations(values)
+        if self.clip is not None:
+            e = np.clip(e, -self.clip, self.clip)
         sp = sm = 0.0
         out = np.zeros(e.size)
         for t in range(e.size):
