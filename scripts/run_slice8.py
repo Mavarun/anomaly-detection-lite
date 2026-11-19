@@ -21,5 +21,19 @@ def main() -> None:
     print(json.dumps(d, indent=2))
 
 
+
+
+def posthoc() -> None:
+    import pandas as pd
+
+    from anomaly_lite.slice8_eval import posthoc_oracle_far
+
+    far = posthoc_oracle_far(pd.read_csv(ART / "slice8_oracle.csv"))
+    far.to_csv(ART / "slice8_posthoc_far.csv", index=False)
+    print(far.groupby(["scenario", "detector"])[["static_far", "oracle_far", "budget_oracle_f1"]].mean().round(4).to_string())
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    posthoc() if "--posthoc" in sys.argv else main()

@@ -102,3 +102,34 @@ def decide(df: pd.DataFrame) -> dict:
     return {"H1": bool(oracle_t3 >= gauss_static - 0.10), "gauss_static_f1": gauss_static, "t3_oracle_f1": oracle_t3,
             "t3_static_f1": float(t3.static_f1.mean()), "t3_gain": float(gain.mean()), "t3_gain_ci": [lo, hi],
             "H2_exhausted": bool(hi < 0.05)}
+
+
+def posthoc_oracle_far(df: pd.DataFrame, n: int = 6000, windows=(0.3, 0.2, 0.5), far_budget: float = 0.005,
+                       tolerance: int = 20) -> pd.DataFrame:
+    """POST-HOC (after the decision; decides nothing): realised false-alarm rate on normal test points
+    at the static and oracle thresholds, per seed, scenario and detector, from the thresholds in ``df``;
+    plus ``budget_oracle_f1``, the best event F1 over the same grid among thresholds whose realised
+    false-alarm rate stays within ``far_budget`` (also label-using, also an upper bound)."""
+    out = []
+    for (seed, scenario), g in df.groupby(["seed", "scenario"], sort=False):
+        stream = make_drifting_stream(n=n, n_events=24, warmup=600, min_gap=80, random_state=int(seed),
+                                      **SCENARIOS6[scenario])
+        fit, cal, test = contiguous_windows(n, windows)
+        t, x, y = stream.frame["t"].to_numpy(), stream.values, stream.labels
+        obs = stream.frame["observed"].to_numpy()
+        resid = residuals5(x, t, fit, stream.meta["period"], "harm_dw3")
+        normal = obs[test] & (y[test] == 0)
+        scores = score6(resid, fit.stop - fit.start)
+        for r in g.itertuples():
+            full = scores[r.detector][test]
+            st = full[normal]
+            fin = full[np.isfinite(full)]
+            best = 0.0
+            for q in QUANTILE_GRID:
+                thr = float(np.quantile(fin, q))
+                if (st > thr).mean() <= far_budget:
+                    best = max(best, _metrics(y[test], obs[test], (full > thr).astype(int), tolerance)["event_f1"])
+            out.append({"seed": seed, "scenario": scenario, "detector": r.detector,
+                        "static_far": float((st > r.static_threshold).mean()),
+                        "oracle_far": float((st > r.oracle_threshold).mean()), "budget_oracle_f1": float(best)})
+    return pd.DataFrame(out)

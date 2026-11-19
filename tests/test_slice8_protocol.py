@@ -42,3 +42,11 @@ def test_rule():
     assert d["H1"] and not d["H2_exhausted"]
     d = S8.decide(_toy(0.72))
     assert not d["H1"] and d["H2_exhausted"]
+
+
+def test_posthoc_far_on_one_dev_seed():
+    df = S8.run_slice8_experiment(S7.DEV_SEEDS[0], "weekend_t3")
+    far = S8.posthoc_oracle_far(df)
+    assert len(far) == len(df) == 3
+    assert ((far.static_far >= 0) & (far.oracle_far <= 1)).all()
+    assert (far.budget_oracle_f1 <= df.oracle_f1.to_numpy() + 1e-12).all()
