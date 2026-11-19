@@ -32,6 +32,64 @@ CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12
 
 ---
 
+## Slice 7 (peaks-over-threshold static threshold): pre-registered, ships OFF
+
+Slice 6 blamed part of the t(3) loss on the static threshold: the empirical 0.5% rank of a
+1,200-point calibration window rests on about 6 points. Slice 7 adds `gpd_tail_threshold`
+(`thresholds.py`). It fits a generalized Pareto to the top 10% of normal calibration scores,
+clips the shape to [-0.5, 0.5] and extrapolates to the 0.5% rate. `static_gpd` is compared with
+`static_quantile` on the same streams (`harm_dw3`, `SCENARIOS6`) using fresh evaluation seeds
+300-309 (`src/anomaly_lite/slice7_eval.py`, `python scripts/run_slice7.py`, ~10 s).
+
+The rules, committed before the run:
+
+- **H1:** the robust_z threshold switches to GPD only if, on weekend_t3, F1 improves on average
+  and on ≥ 7 of 10 seeds, Gaussian F1 drops by no more than 0.01, and t3 cost/1k does not rise.
+- **H2:** slice 6's guardrail, t3 F1 ≥ Gaussian F1 − 0.10, holds under the rule that H1 picks.
+
+### Results (seeds 300-309; quantile / gpd; paired diff is gpd − quantile with bootstrap 95% CI)
+
+| scenario | detector | event F1 | F1 diff [95% CI] | seeds gpd better | cost/1k | threshold | realised FAR |
+| --- | --- | ---: | :---: | ---: | ---: | ---: | ---: |
+| weekend | robust_z | 0.855 / 0.858 | +0.003 [-0.003, +0.009] | 3/10 | 11.0 / 10.8 | 3.03 / 2.95 | 0.0056 / 0.0060 |
+| weekend | cusum_k15 | 0.479 / 0.463 | -0.016 [-0.049, +0.010] | 1/10 | 29.6 / 29.9 | 8.60 / 8.11 | 0.0064 / 0.0067 |
+| weekend | cusum_pw | 0.755 / 0.775 | +0.020 [+0.000, +0.043] | 3/10 | 18.4 / 17.0 | 6.23 / 5.81 | 0.0034 / 0.0050 |
+| weekend_t5 | robust_z | 0.809 / 0.811 | +0.001 [-0.007, +0.013] | 5/10 | 13.4 / 13.1 | 3.40 / 3.31 | 0.0064 / 0.0075 |
+| weekend_t5 | cusum_k15 | 0.566 / 0.606 | +0.040 [-0.030, +0.132] | 3/10 | 26.5 / 25.3 | 7.35 / 6.22 | 0.0129 / 0.0126 |
+| weekend_t5 | cusum_pw | 0.760 / 0.786 | +0.026 [+0.000, +0.060] | 4/10 | 18.0 / 16.8 | 6.64 / 6.34 | 0.0067 / 0.0080 |
+| weekend_t3 | robust_z | 0.752 / 0.763 | +0.011 [-0.013, +0.045] | 2/10 | 16.7 / 15.8 | 4.66 / 4.21 | 0.0044 / 0.0058 |
+| weekend_t3 | cusum_k15 | 0.491 / 0.499 | +0.008 [-0.023, +0.043] | 3/10 | 29.5 / 29.4 | 11.73 / 10.56 | 0.0113 / 0.0111 |
+| weekend_t3 | cusum_pw | 0.709 / 0.710 | +0.001 [-0.047, +0.036] | 5/10 | 21.1 / 20.9 | 9.00 / 8.73 | 0.0099 / 0.0109 |
+
+- **H1 fails, so GPD ships OFF and `static_quantile` stays.** On weekend_t3, robust_z F1 rises
+  by +0.011, but GPD is better on only 2/10 seeds. One seed
+  carries the mean: on seed 308 the empirical rank jumped to 6.02 and F1 fell to 0.504. Without
+  seed 308, robust_z t3 F1 is 0.779 (quantile)
+  vs 0.774 (gpd). The Gaussian and cost parts pass.
+- **H2 fails again:** robust_z F1 is 0.855 on Gaussian vs 0.752 on t3
+  (-0.103, budget 0.10).
+
+### Post-hoc reading (written after the decisions; `python scripts/run_slice7.py --posthoc`)
+
+- **GPD does make the threshold steadier.** Across t3 seeds, the robust_z threshold's spread
+  falls from 0.77 to
+  0.49. GPD's realised FAR
+  (0.0058) is closer to the 0.005 target than
+  the empirical rank's (0.0044), which runs
+  conservative.
+- **Being closer to the target does not raise F1.** The lower threshold trades precision
+  (0.809 → 0.776)
+  for recall (0.732 → 0.770)
+  at about the same F1.
+- **Noise in the threshold estimate is not what drives the guardrail failure.** Even GPD's mean
+  t3 threshold (4.21) is far above its
+  Gaussian one (2.95). The true 0.5% quantile
+  of t(3) residuals really is higher, so the same injected magnitudes clear it less often. A
+  better tail estimate cannot close that gap. A score that stays roughly Gaussian under heavy
+  tails (e.g. a rank or log transform) is the next thing to try. It is not tried here.
+- cusum_pw's mean F1 is a little higher under GPD in every scenario (+0.001 to +0.026, gpd better on only 3-5/10 seeds, the rest mostly ties), but slice 7 made no
+  decision about it, so it stays on the empirical rank.
+
 ## Slice 6 (heavy-tailed noise): hypotheses (pre-registered)
 
 Slice 5 said every stream so far had Gaussian innovations. This slice keeps the slice-5 `weekend` stream and only swaps the innovation law for a unit-variance Student-t (`make_labelled_stream(noise_df=...)`): same marginal sd, AR(1) coefficient, events and labels, so any loss comes from the tails. The rules below are in `slice6_eval.PREREGISTERED` and were committed before evaluation seeds 0-9 were run on any heavy-tailed stream.
