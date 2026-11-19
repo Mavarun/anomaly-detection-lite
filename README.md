@@ -32,6 +32,55 @@ CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12
 
 ---
 
+## Slice 8 (oracle ceiling): can any static threshold pass the heavy-tail guardrail?
+
+Slices 6 and 7 both failed the guardrail (robust_z F1 under t(3) noise ≥ Gaussian F1 − 0.10). **Correction to
+slice 7:** its post-hoc reading named a rank or log transform of the score as the next thing to try. With a static
+threshold, that cannot help: a monotone transform flags exactly the same points (`tests/test_slice8_protocol.py`).
+The question worth asking first is whether *any* static threshold reaches the guardrail. `oracle_threshold`
+(`slice8_eval.py`) picks, per seed, the test-window quantile (65-point grid, 0.90-0.9995) that maximises event F1,
+using the labels. That makes it an upper bound, not a method. Fresh seeds 400-409; run with
+`python scripts/run_slice8.py` (~40 s) and `--posthoc`.
+
+The rules, committed before the run:
+
+- **H1:** the t3 oracle's mean F1 is ≥ Gaussian static F1 − 0.10. If not, no static threshold can pass the guardrail.
+- **H2:** threshold choice counts as exhausted if the upper end of the oracle's t3 gain CI is below 0.05.
+
+| scenario | detector | static F1 | oracle F1 | oracle F1 within 0.5% FAR (post-hoc) | threshold static / oracle | FAR static / oracle (post-hoc) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| weekend | robust_z | 0.841 | 0.872 | 0.851 | 2.89 / 3.20 | 0.0056 / 0.0028 |
+| weekend | cusum_k15 | 0.638 | 0.887 | 0.645 | 5.30 / 0.95 | 0.0094 / 0.0237 |
+| weekend | cusum_pw | 0.749 | 0.904 | 0.781 | 5.40 / 3.32 | 0.0054 / 0.0140 |
+| weekend_t5 | robust_z | 0.791 | 0.835 | 0.800 | 3.36 / 3.40 | 0.0054 / 0.0057 |
+| weekend_t5 | cusum_k15 | 0.519 | 0.850 | 0.569 | 6.99 / 1.59 | 0.0058 / 0.0246 |
+| weekend_t5 | cusum_pw | 0.712 | 0.861 | 0.694 | 6.93 / 4.65 | 0.0072 / 0.0173 |
+| weekend_t3 | robust_z | 0.718 | 0.795 | 0.761 | 4.53 / 3.56 | 0.0051 / 0.0122 |
+| weekend_t3 | cusum_k15 | 0.411 | 0.809 | 0.492 | 12.76 / 2.65 | 0.0070 / 0.0318 |
+| weekend_t3 | cusum_pw | 0.476 | 0.825 | 0.631 | 14.11 / 5.88 | 0.0043 / 0.0226 |
+
+- **H1 passes:** the robust_z t3 oracle reaches 0.795, above the line of 0.741
+  (0.841 − 0.10). The shipped static rule gets 0.718.
+- **H2: not exhausted.** The oracle gain is +0.077 [0.050, 0.104],
+  so a better static rule has room.
+
+### Post-hoc reading (decides nothing)
+
+- **The unconstrained oracle cheats on false alarms.** On t3 it runs at 1.22% FAR, about
+  2.4x the 0.5% budget. Restricted to thresholds within the budget, the best t3 F1 is
+  0.761. That still clears 0.741, but only by 0.019. So the
+  guardrail is reachable inside the budget, but with a narrow margin. The calibrated rule leaves about
+  0.043 on the table, and finding it needs labels the deployed rule does not have.
+- **The CUSUMs are where static calibration fails badly.** Their t3 static thresholds sit 2-5x above the oracle's
+  (cusum_pw 14.1 vs 5.9). Even within the FAR budget, their F1 could rise from 0.41-0.48 to 0.49-0.63. The CUSUM
+  score's calibration-window tail under t(3) is the weak point, more than robust_z's.
+
+### Weaknesses
+
+- The oracle and budget oracle both choose on the test labels. They bound what thresholding can do; they are not
+  rules. The grid has 65 quantiles, so a finer grid could be slightly higher.
+- Ten seeds, one stream family, one de-seasonaliser.
+
 ## Slice 7 (peaks-over-threshold static threshold): pre-registered, ships OFF
 
 Slice 6 blamed part of the t(3) loss on the static threshold: the empirical 0.5% rank of a
