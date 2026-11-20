@@ -26,11 +26,72 @@ python scripts/run_drift_slice.py        # slice 3 (~30 s on CPU)
 python scripts/run_slice4.py             # slice 4 (~2 min on CPU)
 python scripts/run_slice5.py             # slice 5 (~20 s on CPU)
 python scripts/run_slice6.py             # slice 6 (~10 s on CPU)
+python scripts/run_slice9.py             # slice 9 pooled calibration (~10 s; --posthoc ~10 s)
 ```
 
 CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12).
 
 ---
+
+## Slice 9 (pooled calibration): more points under the 0.5% rank - ships OFF
+
+Slice 6 traced part of the t(3) loss to the static threshold: the 0.5% rank of the 1,200-point calibration window
+rests on about 6 points. Slice 9 tests the simplest way to put more points under that rank. `pooled` calibrates on
+the normal points of the fit window (1,800) plus the calibration window (1,200), about 15 points under the rank.
+It is compared with the shipped `quantile` rule on the slice 8 streams (`SCENARIOS6`, `harm_dw3`), using fresh
+seeds 500-509 (`src/anomaly_lite/slice9_eval.py`). Run `python scripts/run_slice9.py` (~10 s) and `--posthoc`.
+
+The rules, committed before the run:
+
+- **H1:** robust_z switches to `pooled` only if three things hold. On weekend_t3, F1 must improve on average and on
+  >= 7 of 10 seeds. Gaussian F1 must drop by no more than 0.01. The realised t3 test FAR must be <= 0.0075 (1.5x
+  the budget).
+- **H2:** slice 6's guardrail (t3 F1 >= Gaussian F1 - 0.10) holds under the rule H1 picks.
+- **Expectation:** H1 fails on the FAR cap, because in-sample fit-window scores are too tight and pull the
+  threshold down.
+
+| scenario | detector | event F1 quantile / pooled | threshold quantile / pooled | test FAR quantile / pooled |
+| --- | --- | ---: | ---: | ---: |
+| weekend | cusum_k15 | 0.672 / 0.000 | 5.32 / 197.08 | 0.0105 / 0.0000 |
+| weekend | cusum_pw | 0.787 / 0.442 | 5.58 / 11.25 | 0.0073 / 0.0013 |
+| weekend | robust_z | 0.831 / 0.718 | 3.02 / 4.78 | 0.0067 / 0.0001 |
+| weekend_t3 | cusum_k15 | 0.489 / 0.000 | 9.04 / 284.23 | 0.0146 / 0.0000 |
+| weekend_t3 | cusum_pw | 0.625 / 0.165 | 9.93 / 38.24 | 0.0113 / 0.0024 |
+| weekend_t3 | robust_z | 0.713 / 0.660 | 4.74 / 6.03 | 0.0045 / 0.0017 |
+| weekend_t5 | cusum_k15 | 0.553 / 0.000 | 8.06 / 222.48 | 0.0093 / 0.0000 |
+| weekend_t5 | cusum_pw | 0.695 / 0.214 | 7.40 / 25.09 | 0.0090 / 0.0008 |
+| weekend_t5 | robust_z | 0.812 / 0.693 | 3.74 / 5.23 | 0.0033 / 0.0004 |
+
+- **H1 fails, so `pooled` ships OFF.** On t3, F1 changes by -0.053, with pooled better on
+  3/10 seeds. On Gaussian streams it changes by -0.113. The FAR cap was not
+  what failed: pooled FAR is 0.0017.
+- **The expectation was wrong in sign.** Pooling *raises* every mean threshold, so FAR and F1 both fall.
+- **H2 fails** under the shipped rule on these seeds: t3 F1 0.713 against a line of
+  0.731 (margin -0.018). That matches slices 6 and 7.
+
+### Post-hoc reading (decides nothing)
+
+The share of fit-window normal scores above the held-out calibration threshold should be about 0.005 if the two
+windows behaved alike. The head share is the fraction of those exceedances in the first 600 points of the fit
+window; spread evenly it would be 0.33.
+
+| scenario | detector | fit-window exceed rate | head share |
+| --- | --- | ---: | ---: |
+| weekend | cusum_k15 | 0.316 | 0.22 |
+| weekend | cusum_pw | 0.083 | 0.29 |
+| weekend | robust_z | 0.066 | 0.44 |
+| weekend_t3 | cusum_k15 | 0.358 | 0.21 |
+| weekend_t3 | cusum_pw | 0.183 | 0.27 |
+| weekend_t3 | robust_z | 0.035 | 0.42 |
+
+Fit-window scores are far *wider* than held-out ones, not tighter. For robust_z the exceedances crowd the start of
+the fit window. The fit window is not a stationary sample of the score. Detector warm-up and the CUSUMs'
+accumulated state are candidate causes, but this slice does not isolate either. Any future pooling would have to
+drop at least the head of the window, and that needs its own protocol.
+
+### Weaknesses
+
+- Ten seeds, one stream family, one de-seasonaliser. The cause of the wide fit-window scores is not isolated.
 
 ## Slice 8 (oracle ceiling): can any static threshold pass the heavy-tail guardrail?
 
