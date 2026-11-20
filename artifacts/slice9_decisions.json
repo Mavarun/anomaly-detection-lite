@@ -1,0 +1,19 @@
+{
+  "preregistered": {
+    "H1_pooled_calibration": "The shipped robust_z static threshold switches to pooled (fit + calibration normal points) calibration iff, on 'weekend_t3' over seeds 500-509, mean event-F1(pooled - quantile) > 0 with pooled better on >= 7 of 10 seeds, AND on Gaussian 'weekend' mean event-F1(pooled - quantile) >= -0.01, AND pooled's mean realised false-alarm rate on normal test points of 'weekend_t3' is <= 0.0075 (1.5x the 0.5% budget). Otherwise it ships OFF.",
+    "H2_guardrail": "Under the rule H1 picks, robust_z mean F1 on 'weekend_t3' >= mean F1 on 'weekend' - 0.10 (slice 6's guardrail). Reported; a failure ships nothing.",
+    "expectation": "Written before the run: H1 fails on the FAR cap, because in-sample fit-window scores are tighter than held-out ones and pull the pooled threshold down.",
+    "reported_not_decided": "weekend_t5 and the two CUSUMs; thresholds and realised FARs for both rules."
+  },
+  "H1": false,
+  "t3_f1_diff": -0.05263961366626346,
+  "t3_seeds_better": 3,
+  "gauss_f1_diff": -0.11340107558871215,
+  "t3_pooled_far": 0.0017476271304006908,
+  "t3_quantile_far": 0.004476682902435497,
+  "rule": "quantile",
+  "t3_f1": 0.7125926993917349,
+  "gauss_f1": 0.8309183975740101,
+  "guardrail_margin": -0.018325698182275252,
+  "H2": false
+}
