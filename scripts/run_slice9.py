@@ -20,5 +20,15 @@ def main() -> None:
     print(json.dumps(d, indent=2))
 
 
+def posthoc() -> None:
+    from anomaly_lite.slice9_eval import posthoc_fit_window
+
+    p = posthoc_fit_window()
+    p.to_csv(ART / "slice9_posthoc_fit_window.csv", index=False)
+    print(p.groupby(["scenario", "detector"])[["fit_exceed_rate", "head_share"]].mean().round(3).to_string())
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    posthoc() if "--posthoc" in sys.argv else main()
