@@ -103,3 +103,34 @@ def decide(df: pd.DataFrame) -> dict:
             "gauss_f1_diff": float(dg.mean()), "t3_pooled_far": far, "t3_quantile_far": float(t3.quantile_far.mean()),
             "rule": rule, "t3_f1": t3_f1, "gauss_f1": g_f1, "guardrail_margin": t3_f1 - (g_f1 - 0.10),
             "H2": bool(t3_f1 >= g_f1 - 0.10)}
+
+
+def posthoc_fit_window(seeds: Iterable[int] = EVAL_SEEDS, scenarios: Iterable[str] = ("weekend", "weekend_t3"),
+                       n: int = 6000, windows=(0.3, 0.2, 0.5), rate: float = RATE, head: int = 600) -> pd.DataFrame:
+    """POST-HOC (after the decision; decides nothing): why pooling raised the thresholds.
+
+    Per seed, scenario and detector: the share of normal fit-window scores above the held-out
+    calibration threshold (nominally ``rate``), and the share of those exceedances in the first
+    ``head`` points of the fit window (``head / fit length`` if they were spread evenly)."""
+    out = []
+    for sc in scenarios:
+        for seed in seeds:
+            stream = make_drifting_stream(n=n, n_events=24, warmup=600, min_gap=80, random_state=int(seed),
+                                          **SCENARIOS6[sc])
+            fit, cal, _ = contiguous_windows(n, windows)
+            t, x, y = stream.frame["t"].to_numpy(), stream.values, stream.labels
+            obs = stream.frame["observed"].to_numpy()
+            scores = score6(residuals5(x, t, fit, stream.meta["period"], "harm_dw3"), fit.stop - fit.start)
+            for det in DETECTORS9:
+                s = scores[det]
+                c = s[cal][obs[cal] & (y[cal] == 0)]
+                thr = false_alarm_threshold(c[np.isfinite(c)], rate)
+                f = s[fit]
+                k = obs[fit] & (y[fit] == 0) & np.isfinite(f)
+                pos = np.arange(fit.start, fit.stop)[k]
+                exc = pos[f[k] > thr]
+                out.append({"seed": int(seed), "scenario": sc, "detector": det,
+                            "fit_exceed_rate": float((f[k] > thr).mean()),
+                            "head_share": float((exc < fit.start + head).mean()) if exc.size else float("nan"),
+                            "head_share_if_even": head / (fit.stop - fit.start)})
+    return pd.DataFrame(out)
