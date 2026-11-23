@@ -28,11 +28,45 @@ python scripts/run_slice5.py             # slice 5 (~20 s on CPU)
 python scripts/run_slice6.py             # slice 6 (~10 s on CPU)
 python scripts/run_slice9.py             # slice 9 pooled calibration (~10 s; --posthoc ~10 s)
 python scripts/run_slice10.py            # slice 10 pooled after the weekly de-seasonaliser (~15 s)
+python scripts/run_slice11.py            # slice 11 longer de-seasonaliser memory (~13 s)
 ```
 
 CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12).
 
 ---
+
+## Slice 11 (longer memory for the weekly de-seasonaliser): one seed carries the gain, ships OFF
+
+The weekly de-seasonaliser updates by recursive least squares with `forgetting = 0.995`, a memory of about 200
+steps, while the weekly cycle it tracks is 672 steps. Slice 11 asks whether `0.999` (about 1,000 steps) is a cheaper
+fix for heavy-tailed noise than slices 9-10's threshold rules. Only the residual changes; robust_z and the shipped
+calibration-window threshold stay. Fresh seeds 700-709; `src/anomaly_lite/slice11_eval.py`,
+`python scripts/run_slice11.py` (~13 s).
+
+The rules, committed before the run:
+
+- **H1:** on `weekend_t3`, F1(0.999 - 0.995) > 0 on average and better on >= 7/10 seeds; Gaussian F1 >= -0.01;
+  t3 FAR <= 0.0075 (slice 9's bar).
+- **H2:** slice 6's guardrail under the forgetting H1 picks.
+- **Expectation** (dev seeds 150-152: t3 better on 2 of 3, Gaussian -0.006): H1 fails on the 7-of-10 part; H2 fails.
+
+| scenario | event F1 0.995 / 0.999 | seeds better | test FAR 0.995 / 0.999 | threshold 0.995 / 0.999 |
+| --- | ---: | ---: | ---: | ---: |
+| weekend | 0.840 / 0.844 | 5/10 | 0.0053 / 0.0045 | 3.02 / 3.02 |
+| weekend_t3 | 0.683 / 0.690 | 4/10 | 0.0051 / 0.0054 | 5.12 / 4.97 |
+| weekend_t5 | 0.786 / 0.817 | 8/10 | 0.0059 / 0.0046 | 3.56 / 3.48 |
+
+- **H1 fails, so forgetting stays 0.995.** The t3 mean gain (+0.007) comes from one seed (705: +0.131). The other
+  nine are 4 worse, 1 tied and 4 better. Gaussian +0.003; t3 FAR 0.0054, inside the cap.
+- **H2 fails** with margin -0.058 at 0.995. On slice 10's seeds the same rule missed by 0.002, so the guardrail
+  line moves by about 0.05 between seed blocks. Ten seeds cannot tell a 0.002 miss from a pass.
+- t(5) gains +0.031 on 8/10 seeds. It was reported, not decided, so it changes nothing here.
+- The expectation held.
+
+### Weaknesses
+
+- Ten seeds, one stream family, one alternative value. The t(5) result suggests a moderate-tail benefit, but it
+  would need its own pre-registered test on fresh seeds.
 
 ## Slice 10 (pooled after the weekly de-seasonaliser): the cause is found, the rule still ships OFF
 
