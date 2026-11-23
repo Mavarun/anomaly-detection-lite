@@ -1,0 +1,26 @@
+{
+  "preregistered": {
+    "C0_mechanism": "Reported, decides nothing about shipping: with the weekly de-seasonaliser in the fit window, robust_z's share of fit-window normal scores (after the 200-point warm-up) above the held-out calibration threshold is <= 0.01 on both 'weekend' and 'weekend_t3' (slice 9: 0.066 and 0.035).",
+    "H1_pooled_weekly": "The shipped robust_z static threshold switches to pooled_weekly iff, on 'weekend_t3' over seeds 600-609, mean event-F1(pooled_weekly - quantile) > 0 with pooled_weekly better on >= 7 of 10 seeds, AND on Gaussian 'weekend' mean event-F1(pooled_weekly - quantile) >= -0.01, AND pooled_weekly's mean realised false-alarm rate on normal test points of 'weekend_t3' is <= 0.0075 (slice 9's bar, unchanged).",
+    "H2_guardrail": "Under the rule H1 picks, robust_z mean F1 on 'weekend_t3' >= mean F1 on 'weekend' - 0.10.",
+    "expectation": "Written before the run, from dev seeds 150-152: C0 holds; H1 fails on the 7-of-10 t3 seeds part (dev t3 gains were split), while the Gaussian part passes; H2 fails.",
+    "reported_not_decided": "weekend_t5 and the two CUSUMs, whose fit-window scores stay wide (CUSUM state)."
+  },
+  "C0": true,
+  "C0_exceed": {
+    "weekend": 0.00931985737727745,
+    "weekend_t3": 0.004829475453778903
+  },
+  "H1": false,
+  "t3_f1_diff": -0.00951033142858294,
+  "t3_seeds_better": 4,
+  "gauss_f1_diff": 0.015241200846634629,
+  "gauss_seeds_better": 7,
+  "t3_pooled_weekly_far": 0.004855602302633713,
+  "t3_quantile_far": 0.004678333932566414,
+  "rule": "quantile",
+  "t3_f1": 0.7014145908693977,
+  "gauss_f1": 0.8033908038046297,
+  "guardrail_margin": -0.00197621293523198,
+  "H2": false
+}
