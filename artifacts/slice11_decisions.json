@@ -1,0 +1,22 @@
+{
+  "preregistered": {
+    "H1_forgetting": "The weekly de-seasonaliser's default forgetting switches 0.995 -> 0.999 iff, with robust_z and the calibration-window quantile threshold over seeds 700-709: on 'weekend_t3' mean event-F1(f999 - f995) > 0 with f999 better on >= 7 of 10 seeds, AND on Gaussian 'weekend' mean event-F1(f999 - f995) >= -0.01, AND f999's mean false-alarm rate on normal 'weekend_t3' test points is <= 0.0075.",
+    "H2_guardrail": "Under the forgetting H1 picks, robust_z mean F1 on 'weekend_t3' >= mean F1 on 'weekend' - 0.10.",
+    "expectation": "Written before the run, from dev seeds 150-152 (t3 better on 2 of 3, mean +0.000; Gaussian -0.006): H1 fails on the 7-of-10 t3 part; H2 fails as in slice 10.",
+    "reported_not_decided": "weekend_t5, and each arm's threshold and FAR."
+  },
+  "decision": {
+    "H1": false,
+    "t3_f1_diff": 0.0073086140920595784,
+    "t3_seeds_better": 4,
+    "gauss_f1_diff": 0.0034516761228639337,
+    "gauss_seeds_better": 5,
+    "t3_f999_far": 0.005410616425869609,
+    "t3_f995_far": 0.005067906595463944,
+    "arm": "f995",
+    "t3_f1": 0.6825003438137507,
+    "gauss_f1": 0.84007537946441,
+    "guardrail_margin": -0.057575035650659356,
+    "H2": false
+  }
+}
