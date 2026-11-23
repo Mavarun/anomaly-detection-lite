@@ -27,11 +27,58 @@ python scripts/run_slice4.py             # slice 4 (~2 min on CPU)
 python scripts/run_slice5.py             # slice 5 (~20 s on CPU)
 python scripts/run_slice6.py             # slice 6 (~10 s on CPU)
 python scripts/run_slice9.py             # slice 9 pooled calibration (~10 s; --posthoc ~10 s)
+python scripts/run_slice10.py            # slice 10 pooled after the weekly de-seasonaliser (~15 s)
 ```
 
 CI: `.github/workflows/tests.yml` runs pytest on push / PR (Python 3.11 and 3.12).
 
 ---
+
+## Slice 10 (pooled after the weekly de-seasonaliser): the cause is found, the rule still ships OFF
+
+Slice 9's post-hoc reading found fit-window normal scores far wider than held-out ones and left the cause open.
+**The cause is in the residuals, not the detectors' warm-up:** with `harm_dw3`, `residuals5` keeps the slice-4
+daily-only static residual on the fit window and applies the weekly harmonic profile only after it. The fit-window
+residual still holds the weekend dip, so slice 9 pooled two different residual series. (On dev seeds 150-152 the
+robust_z exceedances cycle with the 672-bar week rather than crowding the head.) `pooled_weekly`
+(`src/anomaly_lite/slice10_eval.py`) re-scores the fit window with the weekly profile run in-sample, drops the first
+200 points (robust_z's window), and pools those normal scores with the calibration window. Cal and test scores are
+unchanged. Fresh seeds 600-609; run `python scripts/run_slice10.py` (~15 s).
+
+The rules, committed before the run:
+
+- **C0 (mechanism, decides nothing):** robust_z's fit-window exceed rate is <= 0.01 on `weekend` and `weekend_t3`.
+- **H1:** slice 9's bar, unchanged (t3 F1 better on average and on >= 7/10 seeds; Gaussian F1 >= -0.01; t3 FAR <= 0.0075).
+- **H2:** slice 6's guardrail under the rule H1 picks.
+- **Expectation:** C0 holds; H1 fails on the 7-of-10 t3 part while the Gaussian part passes; H2 fails.
+
+| scenario | detector | fit-window exceed rate | event F1 quantile / pooled_weekly | threshold quantile / pooled_weekly | test FAR quantile / pooled_weekly |
+| --- | --- | ---: | ---: | ---: | ---: |
+| weekend | robust_z | 0.0093 | 0.803 / 0.819 | 3.03 / 2.99 | 0.0068 / 0.0045 |
+| weekend | cusum_k15 | 0.0505 | 0.592 / 0.305 | 5.96 / 12.03 | 0.0052 / 0.0017 |
+| weekend | cusum_pw | 0.0420 | 0.721 / 0.385 | 5.78 / 10.33 | 0.0044 / 0.0002 |
+| weekend_t3 | robust_z | 0.0048 | 0.701 / 0.692 | 4.90 / 4.60 | 0.0047 / 0.0049 |
+| weekend_t3 | cusum_k15 | 0.0429 | 0.392 / 0.076 | 17.59 / 31.63 | 0.0068 / 0.0026 |
+| weekend_t3 | cusum_pw | 0.0903 | 0.551 / 0.155 | 10.51 / 23.72 | 0.0154 / 0.0032 |
+| weekend_t5 | robust_z | 0.0080 | 0.798 / 0.796 | 3.47 / 3.58 | 0.0051 / 0.0040 |
+| weekend_t5 | cusum_k15 | 0.0397 | 0.500 / 0.224 | 7.90 / 18.22 | 0.0067 / 0.0024 |
+| weekend_t5 | cusum_pw | 0.0734 | 0.669 / 0.196 | 7.22 / 17.13 | 0.0068 / 0.0004 |
+
+- **C0 holds:** robust_z's fit-window exceed rate falls to 0.0093 (Gaussian) and 0.0048 (t3), against
+  0.066 and 0.035 in slice 9. With the same residual, the fit window behaves like held-out data.
+- **H1 fails, so `pooled_weekly` ships OFF.** On t3, F1 changes by -0.010 and is better on only
+  4/10 seeds. On Gaussian streams it gains +0.015 (7/10), and the t3 FAR stays inside the cap
+  (0.0049). More points under the rank do not lift t3 F1; the threshold barely moves (4.90 -> 4.60).
+- **H2 fails** under the shipped rule: t3 F1 0.701 against a line of 0.703 (margin -0.002),
+  the closest of slices 6-10.
+- **The CUSUMs stay wide** (fit-window exceed rates 4-9%), so pooling doubles their thresholds and cuts their F1.
+  Their accumulated state, not the residual, is what differs in the fit window.
+- The expectation held.
+
+### Weaknesses
+
+- Ten seeds, one stream family. The weekly profile is run in-sample on the fit window, so its residual there is
+  slightly tighter than out of sample; C0 shows it is close, not identical.
 
 ## Slice 9 (pooled calibration): more points under the 0.5% rank - ships OFF
 
